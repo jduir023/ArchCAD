@@ -19,9 +19,11 @@ from canvas import (
     TOOL_SELECT, TOOL_PAN, TOOL_ROOM, TOOL_WALL,
     TOOL_DOOR, TOOL_WINDOW, TOOL_DIMENSION,
     TOOL_POST, TOOL_JOIST, TOOL_SHAPE, TOOL_LINE, TOOL_TEXT,
+    TOOL_FIXTURE,
 )
 from items  import WALL_TYPES, GroupItem
 from rulers import HRuler, VRuler, RULER_W
+from fixture_panel import FixturePanel
 
 # ── Scale & paper options ─────────────────────────────────────────────────────
 # ratio = scene_inches_per_paper_physical_inch
@@ -835,6 +837,29 @@ class MainWindow(QMainWindow):
             self._set_tool(TOOL_TEXT)
         _grp('Text Size', _text_labels, _text_act)
 
+        # ── Fixture / Symbol Library ──────────────────────────────────────────
+        sep = QFrame()
+        sep.setStyleSheet('background: #2a3850; min-height: 2px; max-height: 2px;'
+                          ' margin: 6px 0px 2px 0px;')
+        vl.addWidget(sep)
+
+        hdr_fix = QLabel('  Fixtures & Symbols')
+        hdr_fix.setStyleSheet(
+            'color: #8aadcc; font-size: 9pt; font-weight: bold;'
+            ' font-family: "Segoe UI"; padding: 4px 6px 2px 6px;'
+            ' background: transparent;'
+        )
+        vl.addWidget(hdr_fix)
+
+        self._fixture_panel = FixturePanel()
+        vl.addWidget(self._fixture_panel)
+
+        def _on_fixture_selected(key: str):
+            self._canvas._fixture_type = key
+            self._set_tool(TOOL_FIXTURE)
+
+        self._fixture_panel.fixture_selected.connect(_on_fixture_selected)
+
         vl.addStretch()
 
         # ── Tool shortcuts bar ────────────────────────────────────────────────
@@ -1156,6 +1181,7 @@ class MainWindow(QMainWindow):
 
     def _on_selection_changed(self, items: list):
         from items import RoomItem, ShapeItem, TextItem
+        from fixtures import FixtureItem as _FixItem
         self._props_updating = True
         try:
             if not items:
@@ -1189,6 +1215,10 @@ class MainWindow(QMainWindow):
                 elif isinstance(item, ShapeItem):
                     self._prop_w.setValue(item.w)
                     self._prop_h.setValue(item.h)
+                    self._prop_size_frame.setVisible(True)
+                elif isinstance(item, _FixItem):
+                    self._prop_w.setValue(item._w)
+                    self._prop_h.setValue(item._h)
                     self._prop_size_frame.setVisible(True)
                 else:
                     self._prop_size_frame.setVisible(False)
@@ -1253,7 +1283,8 @@ class MainWindow(QMainWindow):
     def _prop_commit_wh(self):
         if self._props_updating:
             return
-        from items import RoomItem, ShapeItem
+        from items    import RoomItem, ShapeItem
+        from fixtures import FixtureItem as _FixItem
         items = self._canvas.scene().selectedItems()
         if len(items) != 1:
             return
@@ -1272,6 +1303,15 @@ class MainWindow(QMainWindow):
             if ow != nw or oh != nh:
                 def _a(item=item, nw=nw, nh=nh): item.w = nw; item.h = nh; item.update()
                 def _r(item=item, ow=ow, oh=oh): item.w = ow; item.h = oh; item.update()
+                _a()  # apply immediately
+                self._canvas._undo_stack.push(_PropCmd('Resize', _a, _r))
+        elif isinstance(item, _FixItem):
+            ow, oh = item._w, item._h
+            if ow != nw or oh != nh:
+                def _a(item=item, nw=nw, nh=nh):
+                    item.prepareGeometryChange(); item._w = nw; item._h = nh; item.update()
+                def _r(item=item, ow=ow, oh=oh):
+                    item.prepareGeometryChange(); item._w = ow; item._h = oh; item.update()
                 _a()  # apply immediately
                 self._canvas._undo_stack.push(_PropCmd('Resize', _a, _r))
 
@@ -1495,6 +1535,9 @@ class MainWindow(QMainWindow):
         btn = self._tool_btns.get(tool)
         if btn:
             btn.setChecked(True)
+        # Deselect fixture tiles when switching to any non-fixture tool
+        if tool != TOOL_FIXTURE and hasattr(self, '_fixture_panel'):
+            self._fixture_panel.deselect_all()
 
     # ── Design tab callbacks ──────────────────────────────────────────────────
 

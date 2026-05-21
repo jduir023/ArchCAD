@@ -19,6 +19,7 @@ from PyQt6.QtGui   import (QPainter, QPen, QBrush, QColor, QImage, QPixmap,
 from items import (RoomItem, WallItem, DoorItem, WindowItem,
                    DimensionItem, PostItem, JoistFillItem,
                    ShapeItem, LineItem, TextItem, GroupItem)
+from fixtures import FixtureItem
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -41,6 +42,7 @@ TOOL_JOIST     = 'joist'
 TOOL_SHAPE     = 'shape'
 TOOL_LINE      = 'line'
 TOOL_TEXT      = 'text'
+TOOL_FIXTURE   = 'fixture'
 
 # ── Undo commands ─────────────────────────────────────────────────────────────
 
@@ -182,6 +184,7 @@ class CADCanvas(QGraphicsView):
         self._line_style      = 'solid'   # 'solid', 'dash', 'dot'
         self._text_size       = 12        # font size in points
         self._snap_enabled    = True
+        self._fixture_type    = ''        # active fixture key for TOOL_FIXTURE
         self._undo_stack      = QUndoStack(self)
         self._move_origins: dict = {}        # ── layers ──────────────────────────────────────────────────────────────
         self._layers: list[dict] = [{'name': 'Layer 0', 'visible': True, 'locked': False}]
@@ -386,6 +389,14 @@ class CADCanvas(QGraphicsView):
                     self.scene().addItem(item)
                     item._layer_idx = self._active_layer
                     self._undo_stack.push(_AddCmd(self.scene(), item))
+                self._drawing = False
+
+            elif self._tool == TOOL_FIXTURE and self._fixture_type:
+                item = FixtureItem(self._fixture_type)
+                item.setPos(pt)
+                item._layer_idx = self._active_layer
+                self.scene().addItem(item)
+                self._undo_stack.push(_AddCmd(self.scene(), item))
                 self._drawing = False
 
             event.accept()
@@ -838,6 +849,7 @@ class CADCanvas(QGraphicsView):
             ShapeItem.item_type:     ShapeItem,
             LineItem.item_type:      LineItem,
             TextItem.item_type:      TextItem,
+            FixtureItem.item_type:   FixtureItem,
         }
         for d in data.get('items', []):
             if d.get('type') == GroupItem.item_type:
