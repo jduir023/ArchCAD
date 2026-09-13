@@ -10,7 +10,7 @@ import uuid
 
 from PyQt6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QFileDialog, QMessageBox, QGraphicsItem,
-    QInputDialog,
+    QInputDialog, QMenu,
 )
 from PyQt6.QtCore  import Qt, QPointF, QLineF, QRectF, pyqtSignal
 from PyQt6.QtGui   import (QPainter, QPen, QBrush, QColor, QImage, QPixmap,
@@ -18,7 +18,8 @@ from PyQt6.QtGui   import (QPainter, QPen, QBrush, QColor, QImage, QPixmap,
 
 from items import (RoomItem, WallItem, DoorItem, WindowItem,
                    DimensionItem, PostItem, JoistFillItem,
-                   ShapeItem, LineItem, TextItem, GroupItem)
+                   ShapeItem, LineItem, TextItem, GroupItem,
+                   set_print_mode)
 from fixtures import FixtureItem
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -176,6 +177,7 @@ class CADCanvas(QGraphicsView):
         self.project_path  = None    # currently open file
         # ── tool parameters (set by mainwindow) ───────────────────────────────
         self._door_width      = 36    # inches
+        self._window_width    = 36    # inches
         self._joist_spacing   = 16.0  # inches o.c.
         self._joist_direction = 'h'   # 'h' or 'v'
         self._post_size       = 3.5   # inches
@@ -186,13 +188,39 @@ class CADCanvas(QGraphicsView):
         self._snap_enabled    = True
         self._fixture_type    = ''        # active fixture key for TOOL_FIXTURE
         self._undo_stack      = QUndoStack(self)
-        self._move_origins: dict = {}        # ── layers ──────────────────────────────────────────────────────────────
+        self._move_origins: dict = {}
+        # ── layers ───────────────────────────────────────────────────────────
         self._layers: list[dict] = [{'name': 'Layer 0', 'visible': True, 'locked': False}]
         self._active_layer: int  = 0        # ── page / scale ──────────────────────────────────────────────────────
         self.scale_ratio        = 48    # 1/4" = 1ft  (scene_in * ratio = page_in)
         self._paper_phys_w      = 8.5   # physical paper width  (inches)
         self._paper_phys_h      = 11.0  # physical paper height (inches)
-        self._show_page_boundary = True
+        self._show_page_boundary = False
+
+        # ── estimator settings (read by mainwindow estimator dock) ────────────
+        self._est_post_spacing_x    = 8.0    # ft
+        self._est_post_spacing_y    = 8.0    # ft
+        self._est_post_height       = 3.0    # ft above grade
+        self._est_joist_size        = '2x10'
+        self._est_beam_size         = '3x10'
+        self._est_decking_type      = 'deck_board'   # 'deck_board' | 'plywood'
+        self._est_deck_board_width  = 5.5            # actual inches (5/4×6)
+        self._est_waste_pct         = 10.0           # %
+        self._est_stud_spacing      = 16             # inches o.c.
+        self._est_stud_size         = '2x4'          # '2x4' | '2x6'
+        self._est_plate_count       = 2              # top plates
+        self._est_ceiling_ht        = 8.0            # ft
+        self._est_roof_pitch        = 4              # in/12
+        self._est_rafter_spacing    = 16             # inches o.c.
+        self._est_footing_dia       = 12             # inches
+        self._est_footing_depth     = 42             # inches
+        self._est_surface_mode      = 'walls'        # 'walls' | 'rails'
+        self._est_include_hardware  = True
+        self._est_include_concrete  = True
+        self._est_include_roof      = False
+        self._est_include_finish    = False
+        self._est_include_electrical = False
+        self._est_stock_lengths     = [8, 10, 12, 16]
 
         # ── view settings ─────────────────────────────────────────────────────
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -202,7 +230,9 @@ class CADCanvas(QGraphicsView):
             QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(
             QGraphicsView.ViewportAnchor.AnchorViewCenter)
-        self.setBackgroundBrush(QBrush(QColor('#1e2533')))
+        self.setBackgroundBrush(QBrush(QColor('#0a0a0a')))
+        self.setViewportUpdateMode(
+            QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
 
@@ -230,8 +260,12 @@ class CADCanvas(QGraphicsView):
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
             self.setCursor(Qt.CursorShape.CrossCursor)
 
-    def toggle_grid(self, visible: bool):
-        self._show_grid = visible
+    def toggle_grid(self, visible: bool | None = None):
+        """Show/hide the grid.  Omit `visible` to toggle."""
+        if visible is None:
+            self._show_grid = not self._show_grid
+        else:
+            self._show_grid = bool(visible)
         self.scene().update()
 
     # ── Coordinate helpers ────────────────────────────────────────────────────
@@ -269,11 +303,11 @@ class CADCanvas(QGraphicsView):
                 painter.drawLine(QLineF(rect.left(), y, rect.right(), y))
                 y += step
 
-        _grid(GRID_MINOR, QColor('#2c3a4e'))
-        _grid(GRID_MAJOR, QColor('#3a4f68'))
+        _grid(GRID_MINOR, QColor('#1a1a1a'))
+        _grid(GRID_MAJOR, QColor('#2a2a2a'))
 
         # origin cross (dashed)
-        pen = QPen(QColor('#4a6080'), 0)
+        pen = QPen(QColor('#3a3a3a'), 0)
         pen.setStyle(Qt.PenStyle.DashLine)
         painter.setPen(pen)
         painter.drawLine(QLineF(rect.left(),  0, rect.right(),  0))
@@ -333,13 +367,13 @@ class CADCanvas(QGraphicsView):
                 self.scene().addItem(self._preview)
 
             elif self._tool == TOOL_DOOR:
-                self._preview = DoorItem(36)
+                self._preview = DoorItem(self._door_width)
                 self._preview.setPos(pt)
                 self._preview.setOpacity(0.60)
                 self.scene().addItem(self._preview)
 
             elif self._tool == TOOL_WINDOW:
-                self._preview = WindowItem(0, 0)
+                self._preview = WindowItem(self._window_width, 0)
                 self._preview.setPos(pt)
                 self._preview.setOpacity(0.60)
                 self.scene().addItem(self._preview)
@@ -449,7 +483,19 @@ class CADCanvas(QGraphicsView):
                     self._preview.setRotation(
                         math.degrees(math.atan2(dy, dx)))
 
-            elif self._tool in (TOOL_WINDOW, TOOL_DIMENSION):
+            elif self._tool == TOOL_WINDOW:
+                # Keep the preset width; drag only sets direction/angle
+                dx = pt.x() - self._draw_start.x()
+                dy = pt.y() - self._draw_start.y()
+                L  = math.hypot(dx, dy)
+                if L > 1:
+                    w = float(self._window_width)
+                    self._preview.dx = w * dx / L
+                    self._preview.dy = w * dy / L
+                    self._preview.prepareGeometryChange()
+                    self._preview.update()
+
+            elif self._tool == TOOL_DIMENSION:
                 rel = pt - self._draw_start
                 self._preview.dx = rel.x()
                 self._preview.dy = rel.y()
@@ -521,7 +567,10 @@ class CADCanvas(QGraphicsView):
                 elif self._tool == TOOL_DOOR:
                     keep = True   # single-click placement
 
-                elif self._tool in (TOOL_WINDOW, TOOL_DIMENSION):
+                elif self._tool == TOOL_WINDOW:
+                    keep = True   # click-to-place at preset width
+
+                elif self._tool == TOOL_DIMENSION:
                     keep = math.hypot(
                         self._preview.dx, self._preview.dy) >= self._snap
 
@@ -571,6 +620,95 @@ class CADCanvas(QGraphicsView):
         super().resizeEvent(event)
         self.viewport_changed.emit()
 
+    def mouseDoubleClickEvent(self, event):
+        """Double-click a RoomItem or JoistFillItem to rename it."""
+        if self._tool != TOOL_SELECT:
+            super().mouseDoubleClickEvent(event)
+            return
+        item = self.itemAt(event.pos())
+        if item is None:
+            super().mouseDoubleClickEvent(event)
+            return
+        if isinstance(item, RoomItem):
+            name, ok = QInputDialog.getText(
+                self, 'Room Label',
+                'Enter a name for this room/section:',
+                text=item.label)
+            if ok:
+                new = name.strip()
+                old = item.label
+                if new != old:
+                    def _a(it=item, v=new):
+                        it.label = v; it.update()
+                    def _r(it=item, v=old):
+                        it.label = v; it.update()
+                    _a()
+                    self._undo_stack.push(_PropCmd('Rename room', _a, _r))
+            event.accept()
+            return
+        if isinstance(item, JoistFillItem):
+            cur = getattr(item, 'label', '')
+            name, ok = QInputDialog.getText(
+                self, 'Section Label',
+                'Enter a name for this joist area/section:',
+                text=cur)
+            if ok:
+                new = name.strip()
+                old = cur
+                if new != old:
+                    def _a(it=item, v=new):
+                        it.label = v; it.update()
+                    def _r(it=item, v=old):
+                        it.label = v; it.update()
+                    _a()
+                    self._undo_stack.push(_PropCmd('Rename section', _a, _r))
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def contextMenuEvent(self, event):
+        """Right-click context menu."""
+        scene_pt = self.mapToScene(event.pos())
+        selected = self.scene().selectedItems()
+
+        menu = QMenu(self)
+
+        act_add_text = menu.addAction('Add Text Here')
+
+        if selected:
+            menu.addSeparator()
+            act_del = menu.addAction(f'Delete Selected  ({len(selected)} item{"s" if len(selected) != 1 else ""})')
+        else:
+            act_del = None
+
+        chosen = menu.exec(event.globalPos())
+
+        if chosen == act_add_text:
+            text, ok = QInputDialog.getText(self, 'Add Text', 'Enter label:')
+            if ok and text.strip():
+                item = TextItem(text.strip(), self._text_size)
+                item.setPos(self._snap_pt(scene_pt))
+                item._layer_idx = self._active_layer
+                self.scene().addItem(item)
+                self._undo_stack.push(_AddCmd(self.scene(), item))
+
+        elif act_del and chosen == act_del:
+            from PyQt6.QtGui import QUndoCommand
+
+            class _MultiDelCmd(QUndoCommand):
+                def __init__(self, sc, items):
+                    super().__init__('Delete items')
+                    self._sc    = sc
+                    self._items = list(items)
+                def redo(self):
+                    for i in self._items:
+                        self._sc.removeItem(i)
+                def undo(self):
+                    for i in self._items:
+                        self._sc.addItem(i)
+
+            self._undo_stack.push(_MultiDelCmd(self.scene(), selected))
+
     def wheelEvent(self, event):
         factor = 1.15 if event.angleDelta().y() > 0 else 1.0 / 1.15
         self.scale(factor, factor)
@@ -602,6 +740,11 @@ class CADCanvas(QGraphicsView):
 
         if k in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             self.delete_selected()
+        elif k == Qt.Key.Key_R:
+            delta = -90.0 if mods & Qt.KeyboardModifier.ShiftModifier else 90.0
+            self._rotate_selection(delta)
+            event.accept()
+            return
         elif k == Qt.Key.Key_Escape:
             if self._drawing and self._preview:
                 self.scene().removeItem(self._preview)
@@ -615,7 +758,55 @@ class CADCanvas(QGraphicsView):
         items = list(self.scene().selectedItems())
         if items:
             self._undo_stack.push(_DeleteCmd(self.scene(), items))
+
+    def _rotate_selection(self, delta: float):
+        """Rotate selected Door/Fixture/Window items by delta degrees (undoable)."""
+        import math as _math
+        from items    import DoorItem, WindowItem
+        from fixtures import FixtureItem
+        sel = [i for i in self.scene().selectedItems()
+               if isinstance(i, (DoorItem, WindowItem, FixtureItem))]
+        if not sel:
+            return
+        self._undo_stack.beginMacro(f'Rotate {len(sel)} item(s) {delta:+.0f}\u00b0')
+        for item in sel:
+            if isinstance(item, (DoorItem, FixtureItem)):
+                old = item.rotation()
+                new = (old + delta) % 360.0
+                def _a(it=item, a=new):  it.setRotation(a)
+                def _r(it=item, a=old):  it.setRotation(a)
+                _a()
+                self._undo_stack.push(_PropCmd('Rotate', _a, _r))
+            else:  # WindowItem
+                old_dx, old_dy = item.dx, item.dy
+                L = _math.hypot(old_dx, old_dy)
+                if L < 0.1:
+                    continue
+                rad = _math.atan2(old_dy, old_dx) + _math.radians(delta)
+                new_dx = L * _math.cos(rad)
+                new_dy = L * _math.sin(rad)
+                def _a(it=item, dx=new_dx, dy=new_dy):
+                    it.prepareGeometryChange(); it.dx = dx; it.dy = dy; it.update()
+                def _r(it=item, dx=old_dx, dy=old_dy):
+                    it.prepareGeometryChange(); it.dx = dx; it.dy = dy; it.update()
+                _a()
+                self._undo_stack.push(_PropCmd('Rotate', _a, _r))
+        self._undo_stack.endMacro()
     # ── Clipboard helpers ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _offset_dict(d: dict, offset_x: float, offset_y: float) -> dict:
+        """Shift any position keys used by CAD item serializers."""
+        dc = dict(d)
+        if 'x' in dc:
+            dc['x'] = dc.get('x', 0) + offset_x
+            dc['y'] = dc.get('y', 0) + offset_y
+        if 'x1' in dc:
+            dc['x1'] = dc.get('x1', 0) + offset_x
+            dc['y1'] = dc.get('y1', 0) + offset_y
+            dc['x2'] = dc.get('x2', 0) + offset_x
+            dc['y2'] = dc.get('y2', 0) + offset_y
+        return dc
 
     def paste_items(self, dicts: list, offset_x: float = 24.0,
                     offset_y: float = 24.0) -> list:
@@ -631,18 +822,30 @@ class CADCanvas(QGraphicsView):
             ShapeItem.item_type:     ShapeItem,
             LineItem.item_type:      LineItem,
             TextItem.item_type:      TextItem,
-            GroupItem.item_type:     GroupItem,
+            FixtureItem.item_type:   FixtureItem,
         }
         new_items = []
         self._undo_stack.beginMacro(f'Paste {len(dicts)} item(s)')
         for d in dicts:
+            if d.get('type') == GroupItem.item_type:
+                g = GroupItem.from_dict(self._offset_dict(d, offset_x, offset_y))
+                g.item_id = str(uuid.uuid4())
+                self.scene().addItem(g)
+                for cd in d.get('children', []):
+                    ccls = loaders.get(cd.get('type'))
+                    if ccls:
+                        child = ccls.from_dict(cd)
+                        child.item_id = str(uuid.uuid4())
+                        child._layer_idx = cd.get('layer_idx', 0)
+                        g.addToGroup(child)
+                self._undo_stack.push(_AddCmd(self.scene(), g))
+                new_items.append(g)
+                continue
             cls = loaders.get(d.get('type'))
             if cls:
-                dc = dict(d)   # shallow copy
-                dc['x'] = dc.get('x', 0) + offset_x
-                dc['y'] = dc.get('y', 0) + offset_y
+                dc = self._offset_dict(d, offset_x, offset_y)
                 item = cls.from_dict(dc)
-                item.item_id   = str(uuid.uuid4())   # fresh id
+                item.item_id    = str(uuid.uuid4())   # fresh id
                 item._layer_idx = dc.get('layer_idx', 0)
                 self.scene().addItem(item)
                 self._undo_stack.push(_AddCmd(self.scene(), item))
@@ -776,6 +979,7 @@ class CADCanvas(QGraphicsView):
     def new_project(self):
         self.scene().clear()
         self._undo_stack.clear()
+        self._undo_stack.setClean()
         self._layers = [{'name': 'Layer 0', 'visible': True, 'locked': False}]
         self._active_layer = 0
         self.layers_changed.emit()
@@ -810,10 +1014,16 @@ class CADCanvas(QGraphicsView):
             'layers':       self._layers,
             'items':        items_data,
         }
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(project, f, indent=2)
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(project, f, indent=2)
+        except OSError as exc:
+            QMessageBox.critical(self, 'Save Failed',
+                                 f'Could not save project:\n{exc}')
+            return False
 
         self.project_path = path
+        self._undo_stack.setClean()
         return True
 
     def open_project(self) -> bool:
@@ -823,11 +1033,17 @@ class CADCanvas(QGraphicsView):
         if not path:
             return False
 
-        with open(path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            QMessageBox.critical(self, 'Open Failed',
+                                 f'Could not open project:\n{exc}')
+            return False
 
         self.scene().clear()
         self._undo_stack.clear()
+        self._undo_stack.setClean()
         # Restore page settings if present (v2+)
         if 'scale_ratio' in data:
             self.scale_ratio    = data['scale_ratio']
@@ -887,16 +1103,24 @@ class CADCanvas(QGraphicsView):
                         width: float, height: float,
                         spacing_x: float, spacing_y: float,
                         post_size: float):
-        """Place a grid of posts at spacing_x / spacing_y intervals."""
+        """Place a grid of posts at spacing_x / spacing_y intervals (undoable)."""
+        posts = []
         x = origin_x
         while x <= origin_x + width + 0.1:
             y = origin_y
             while y <= origin_y + height + 0.1:
                 post = PostItem(post_size)
                 post.setPos(x, y)
+                post._layer_idx = self._active_layer
                 self.scene().addItem(post)
+                posts.append(post)
                 y += spacing_y
             x += spacing_x
+        if posts:
+            self._undo_stack.beginMacro(f'Auto-fill {len(posts)} post(s)')
+            for post in posts:
+                self._undo_stack.push(_AddCmd(self.scene(), post))
+            self._undo_stack.endMacro()
 
     # ── Export ────────────────────────────────────────────────────────────────
 
@@ -923,9 +1147,15 @@ class CADCanvas(QGraphicsView):
 
         painter = QPainter(img)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.scene().render(painter, source=rect)
+        set_print_mode(True)
+        try:
+            self.scene().render(painter, source=rect)
+        finally:
+            set_print_mode(False)
         painter.end()
 
-        img.save(path)
+        if not img.save(path):
+            QMessageBox.critical(self, 'Export PNG', f'Could not write:\n{path}')
+            return False
         QMessageBox.information(self, 'Export PNG', f'Saved:\n{path}')
         return True

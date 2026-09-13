@@ -1,5 +1,5 @@
 """
-ArchCAD — Comprehensive Smoke Test  (116 tests, 16 sections)
+ArchCAD — Comprehensive Smoke Test  (155 tests, 18 sections)
 Run with:
     python smoke_test.py
 
@@ -13,7 +13,7 @@ Sections:
   6.  Undo / redo commands             ( 8 tests)
   7.  Layer management                 ( 9 tests)
   8.  Project save / load roundtrip    ( 3 tests)
-  9.  Paste / duplicate                ( 3 tests)
+  9.  Paste / duplicate                ( 8 tests)
  10.  MainWindow selection + panels    ( 9 tests)
  11.  Property commits XY/WH/text/font ( 5 tests)
  12.  Lock toggle                      ( 4 tests)
@@ -21,6 +21,8 @@ Sections:
  14.  Z-order, select-all, move-layer  ( 5 tests)
  15.  Scale / paper / page / post-grid ( 5 tests)
  16.  Item flags + uniqueness          ( 3 tests)
+ 17.  Estimator unit tests             (12 tests)
+ 18.  Code Compliance Engine           (12 tests)
 """
 import sys, os
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
@@ -739,10 +741,65 @@ def s9_paste_undo_macro():
     c._undo_stack.undo()             # single undo undoes entire macro
     assert len(sc.items()) == pre
 
+def s9_paste_wall_xy_offset():
+    c = CADCanvas(); sc = c.scene()
+    w = WallItem(0, 0, 120, 0); sc.addItem(w)
+    pasted = c.paste_items([w.to_dict()], 24, 12)
+    assert len(pasted) == 1
+    d = pasted[0].to_dict()
+    assert abs(d['x1'] - 24) < 0.01
+    assert abs(d['y1'] - 12) < 0.01
+    assert abs(d['x2'] - 144) < 0.01
+
+def s9_paste_window_xy_offset():
+    c = CADCanvas(); sc = c.scene()
+    w = WindowItem(36, 0); w.setPos(10, 20); sc.addItem(w)
+    pasted = c.paste_items([w.to_dict()], 24, 24)
+    assert len(pasted) == 1
+    d = pasted[0].to_dict()
+    assert abs(d['x1'] - 34) < 0.01
+    assert abs(d['y1'] - 44) < 0.01
+    assert abs(d['x2'] - 70) < 0.01
+
+def s9_paste_fixture():
+    from fixtures import FixtureItem
+    c = CADCanvas(); sc = c.scene()
+    f = FixtureItem('toilet'); f.setPos(0, 0); sc.addItem(f)
+    pasted = c.paste_items([f.to_dict()], 24, 24)
+    assert len(pasted) == 1
+    assert pasted[0].item_type == 'fixture'
+    assert abs(pasted[0].pos().x() - 24) < 0.01
+    assert pasted[0].item_id != f.item_id
+
+def s9_paste_group_keeps_children():
+    c = CADCanvas(); sc = c.scene()
+    r = RoomItem(60, 48); w = WallItem(0, 0, 60, 0)
+    sc.addItem(r); sc.addItem(w)
+    r.setSelected(True); w.setSelected(True)
+    c.group_selected()
+    groups = [i for i in sc.items() if isinstance(i, GroupItem)]
+    assert groups
+    pasted = c.paste_items([groups[0].to_dict()], 24, 24)
+    assert len(pasted) == 1
+    kids = [ch for ch in pasted[0].childItems() if hasattr(ch, 'to_dict')]
+    assert len(kids) == 2
+
+def s9_window_preset_width():
+    c = CADCanvas()
+    c._window_width = 48
+    assert c._window_width == 48
+    item = WindowItem(c._window_width, 0)
+    assert abs(math.hypot(item.dx, item.dy) - 48) < 0.01
+
 for _name, _fn in [
     ('paste: offset + fresh ID',       s9_paste_offset_and_fresh_id),
     ('paste: multiple item types',     s9_paste_multiple),
     ('paste: undo is one macro step',  s9_paste_undo_macro),
+    ('paste: wall x1/y1 offset',       s9_paste_wall_xy_offset),
+    ('paste: window x1/y1 offset',     s9_paste_window_xy_offset),
+    ('paste: fixture not dropped',     s9_paste_fixture),
+    ('paste: group keeps children',    s9_paste_group_keeps_children),
+    ('window preset width applied',    s9_window_preset_width),
 ]:
     chk(_name, _fn)
 
@@ -761,6 +818,13 @@ def s10_init_attrs():
                  '_prop_info', '_preset_btn_sel', '_preset_btn_pan',
                  '_clipboard', '_props_updating'):
         assert hasattr(w, attr), f'Missing: {attr!r}'
+    assert callable(w._act_print)
+    assert callable(w._act_print_preview)
+    assert hasattr(w, '_estimator_dock')
+    from PyQt6.QtWidgets import QDockWidget as _QD
+    feat = w._estimator_dock.features()
+    assert not (feat & _QD.DockWidgetFeature.DockWidgetClosable), \
+        'Estimator dock must not be closable — Redock instead of Close'
     w.close()
 
 def s10_selection_empty():
@@ -1204,6 +1268,498 @@ for _name, _fn in [
     ('lock/unlock all item types',        s16_lock_all_types),
     ('item_id: 20 instances all unique',  s16_item_id_unique),
     ('all item types are selectable',     s16_selectable_flag),
+]:
+    chk(_name, _fn)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Section 17 — Estimator unit tests  (12 tests)
+# ═════════════════════════════════════════════════════════════════════════════
+
+from estimator import (LumberSchedule, EstimatorSettings,
+                       MaterialEstimator, MaterialReport)
+
+# 17-1  LumberSchedule.round_up basic cases
+def s17_round_up_basic():
+    sched = LumberSchedule([8, 10, 12, 16])
+    assert sched.round_up(7.0)  == 8,  'round 7 → 8'
+    assert sched.round_up(8.0)  == 8,  'exact 8 → 8'
+    assert sched.round_up(8.5)  == 10, 'round 8.5 → 10'
+    assert sched.round_up(12.0) == 12, 'exact 12 → 12'
+    assert sched.round_up(15.9) == 16, 'round 15.9 → 16'
+    assert sched.round_up(17.0) == 16, 'clamp beyond max → 16'
+
+# 17-2  LumberSchedule.summarize groups correctly
+def s17_summarize():
+    sched = LumberSchedule([8, 10, 12, 16])
+    summary = sched.summarize([7.5, 7.5, 9.0, 11.5])
+    # 7.5 → 8  (×2),  9.0 → 10  (×1),  11.5 → 12  (×1)
+    assert summary.get(8)  == 2
+    assert summary.get(10) == 1
+    assert summary.get(12) == 1
+
+# 17-3  Post grid: corners always included
+def s17_post_grid_corners():
+    est = MaterialEstimator()
+    pos = est._grid_positions(240, 96)   # 20 ft span, 8 ft spacing
+    assert pos[0]  == 0,   'grid must start at 0'
+    assert pos[-1] == 240, 'grid must end at span'
+
+# 17-4  Post grid: zero-size region → no crash
+def s17_post_grid_zero():
+    est = MaterialEstimator()
+    pos = est._grid_positions(0, 96)
+    assert 0 in pos, 'zero span must still include 0'
+
+# 17-5  Joist count for 120×96 fill @ 16" o.c. horizontal
+def s17_joist_count():
+    report = MaterialReport()
+    sched  = LumberSchedule([8, 10, 12, 16])
+    est    = MaterialEstimator()
+    settings = EstimatorSettings(waste_pct=0)
+    fill = [{'type': 'joist_fill', 'x': 0, 'y': 0,
+              'w': 120, 'h': 96, 'spacing': 16, 'direction': 'h'}]
+    est._calc_substructure(report, sched, fill, [], settings)
+    # direction='h', spacing=16, h=96 → 96/16=6 spaces → 5 interior joists
+    joist_lines = [ln for ln in report.lines
+                   if 'joist' in ln.description and 'band' not in ln.description]
+    total_pcs = sum(int(ln.qty) for ln in joist_lines)
+    assert total_pcs == 5, f'expected 5 joists, got {total_pcs}'
+
+# 17-6  Band board count: 4 per JoistFillItem
+def s17_band_count():
+    report = MaterialReport()
+    sched  = LumberSchedule([8, 10, 12, 16])
+    est    = MaterialEstimator()
+    settings = EstimatorSettings(waste_pct=0)
+    fill = [{'type': 'joist_fill', 'x': 0, 'y': 0,
+              'w': 96, 'h': 96, 'spacing': 16, 'direction': 'h'}]
+    est._calc_substructure(report, sched, fill, [], settings)
+    band_lines = [ln for ln in report.lines if 'band' in ln.description]
+    total_band = sum(int(ln.qty) for ln in band_lines)
+    assert total_band == 4, f'expected 4 band boards, got {total_band}'
+
+# 17-7  Blocking triggered when joist span > 96 in
+def s17_blocking_triggered():
+    report = MaterialReport()
+    sched  = LumberSchedule([8, 10, 12, 16])
+    est    = MaterialEstimator()
+    settings = EstimatorSettings(waste_pct=0)
+    # w=200 → span 200 in > 96 in threshold
+    fill = [{'type': 'joist_fill', 'x': 0, 'y': 0,
+              'w': 200, 'h': 96, 'spacing': 16, 'direction': 'h'}]
+    est._calc_substructure(report, sched, fill, [], settings)
+    blocking = [ln for ln in report.lines if 'blocking' in ln.description.lower()]
+    assert blocking, 'blocking should appear for span > 96 in'
+
+# 17-8  No blocking for short span
+def s17_no_blocking_short():
+    report = MaterialReport()
+    sched  = LumberSchedule([8, 10, 12, 16])
+    est    = MaterialEstimator()
+    settings = EstimatorSettings(waste_pct=0)
+    fill = [{'type': 'joist_fill', 'x': 0, 'y': 0,
+              'w': 96, 'h': 96, 'spacing': 16, 'direction': 'h'}]
+    est._calc_substructure(report, sched, fill, [], settings)
+    blocking = [ln for ln in report.lines if 'blocking' in ln.description.lower()]
+    assert not blocking, 'no blocking for span <= 96 in'
+
+# 17-9  Deck board count from known area
+def s17_deck_boards():
+    report = MaterialReport()
+    sched  = LumberSchedule([8, 10, 12, 16])
+    est    = MaterialEstimator()
+    settings = EstimatorSettings(decking_type='deck_board',
+                                  deck_board_width=5.5, waste_pct=0)
+    # 10×10 ft = 100 sqft, board width 5.5 in = 5.5/12 ft
+    # linear ft needed = 100 / (5.5/12) ≈ 218 lf
+    fill = [{'type': 'joist_fill', 'x': 0, 'y': 0,
+              'w': 120, 'h': 120, 'spacing': 16, 'direction': 'h'}]
+    est._calc_decking(report, sched, fill, settings)
+    board_lines = [ln for ln in report.lines if 'Deck board' in ln.description]
+    assert board_lines, 'deck board line should be present'
+
+# 17-10  Plywood sheet count rounds up
+def s17_plywood_roundup():
+    report = MaterialReport()
+    sched  = LumberSchedule([8, 10, 12, 16])
+    est    = MaterialEstimator()
+    settings = EstimatorSettings(decking_type='plywood', waste_pct=0)
+    # 33 sqft → ceil(33/32) = 2 sheets (without waste)
+    fill = [{'type': 'joist_fill', 'x': 0, 'y': 0,
+              'w': 36, 'h': 11, 'spacing': 16, 'direction': 'h'}]
+    # area = 3 ft × ~0.917 ft = 2.75 sqft — too small, use bigger
+    fill = [{'type': 'joist_fill', 'x': 0, 'y': 0,
+              'w': 72, 'h': 66, 'spacing': 16, 'direction': 'h'}]
+    # area = 6 ft × 5.5 ft = 33 sqft → ceil(33/32)=2 sheets
+    est._calc_decking(report, sched, fill, settings)
+    sheet_lines = [ln for ln in report.lines if 'Plywood' in ln.description
+                   and 'sheet' in ln.unit]
+    assert sheet_lines, 'plywood sheet line should be present'
+    total_sheets = sum(int(ln.qty) for ln in sheet_lines)
+    assert total_sheets == 2, f'expected 2 sheets, got {total_sheets}'
+
+# 17-11  Concrete volume formula
+def s17_concrete_volume():
+    report   = MaterialReport()
+    settings = EstimatorSettings(footing_dia_in=12, footing_depth_in=48,
+                                  include_concrete=True)
+    est = MaterialEstimator()
+    # 1 post, 12" dia × 4 ft deep
+    # vol = π × 0.5² × 4 = π ≈ 3.14 cu ft → ceil(3.14/0.60) = 6 bags
+    # rooms=[] is fine for posts type — it falls into the posts branch
+    est._calc_concrete(report, 1, [], settings)
+    bag_lines = [ln for ln in report.lines if '80 lb concrete' in ln.description]
+    assert bag_lines, '80 lb bag line should be present'
+    bags = int(bag_lines[0].qty)
+    assert bags == 6, f'expected 6 bags for 1 footing, got {bags}'
+
+# 17-12  Full estimator run on synthetic scene — no crash, returns report
+# Shared scene items used by several s17 tests
+_S17_SCENE = [
+    {'type': 'joist_fill', 'x': 0, 'y': 0,
+     'w': 240, 'h': 192, 'spacing': 16, 'direction': 'h'},
+    {'type': 'post', 'x': 0, 'y': 0, 'size': 3.5},
+    {'type': 'wall', 'x1': 0, 'y1': 0, 'x2': 240, 'y2': 0, 'wall_type': 'exterior_6'},
+    {'type': 'wall', 'x1': 0, 'y1': 0, 'x2': 0,   'y2': 192, 'wall_type': 'exterior_6'},
+    {'type': 'wall', 'x1': 0, 'y1': 192,'x2': 240, 'y2': 192, 'wall_type': 'exterior_6'},
+    {'type': 'wall', 'x1': 240,'y1': 0, 'x2': 240, 'y2': 192, 'wall_type': 'exterior_6'},
+    {'type': 'door',   'x': 0,  'y': 0, 'width': 36, 'height': 80, 'rotation': 0},
+    {'type': 'window', 'x1': 60, 'y1': 0, 'x2': 96, 'y2': 36},
+    {'type': 'room',   'x': 0,  'y': 0, 'w': 240, 'h': 192, 'label': 'living'},
+    {'type': 'room',   'x': 240,'y': 0, 'w': 180, 'h': 180, 'label': 'bedroom'},
+]
+
+def s17_full_run_no_crash():
+    settings = EstimatorSettings(
+        include_hardware=True, include_concrete=True,
+        include_roof=True, include_finish=True, include_electrical=True)
+    report = MaterialEstimator().run(_S17_SCENE, settings)
+    assert isinstance(report, MaterialReport)
+    assert len(report.lines) > 0, 'report should have lines'
+    assert report.to_csv().startswith('Category'), 'CSV should have header'
+    assert 'Material Estimate' in report.to_plain_text()
+
+def s17_new_categories_present():
+    """All new comprehensive categories produce at least one line."""
+    settings = EstimatorSettings(
+        include_drywall=True, include_insulation=True,
+        include_flooring=True, include_doors_windows=True,
+        include_siding=True, include_roofing=True,
+        include_trim=True, include_plumbing=True, include_hvac=True,
+        include_roof=True, flooring_type='lvp', siding_type='vinyl',
+        roofing_type='shingles', ceiling_insul_r=38,
+    )
+    report = MaterialEstimator().run(_S17_SCENE, settings)
+    cats = report.categories()
+    for expected in ('Drywall & Finishing', 'Insulation', 'Flooring',
+                     'Doors & Windows', 'Exterior Finish', 'Roofing Materials',
+                     'Interior Trim', 'Plumbing (Rough)', 'HVAC (Rough)'):
+        assert expected in cats, f'Missing category: {expected}'
+
+def s17_flooring_types_no_crash():
+    """Each flooring type runs without error."""
+    for ftype in ('lvp', 'tile', 'carpet', 'hardwood'):
+        s = EstimatorSettings(include_flooring=True, flooring_type=ftype)
+        MaterialEstimator().run(_S17_SCENE, s)
+
+def s17_plumbing_empty_rooms():
+    """Plumbing stub with no drawn items: synthesis creates a room, so plumbing computes."""
+    settings = EstimatorSettings(include_plumbing=True,
+                                  building_width_ft=20.0, building_length_ft=30.0)
+    report = MaterialEstimator().run([], settings)
+    # Synthesis creates a room from settings dims → plumbing should produce lines
+    plumbing_lines = [ln for ln in report.lines if ln.category == 'Plumbing (Rough)']
+    assert len(plumbing_lines) > 0, 'Expected plumbing lines via synthesis room'
+
+def s17_synthesis_blank_canvas():
+    """All checked categories compute on a blank canvas using settings dimensions."""
+    settings = EstimatorSettings(
+        building_width_ft=24.0, building_length_ft=32.0,
+        door_count=2, window_count=4,
+        include_drywall=True, include_insulation=True, include_flooring=True,
+        include_siding=True, include_roofing=True, include_roof=True,
+        include_plumbing=True, include_hvac=True, include_concrete=True,
+        foundation_type='slab',
+    )
+    report = MaterialEstimator().run([], settings)  # completely empty scene
+    assert len(report.lines) > 15, f'Expected >15 lines on blank canvas, got {len(report.lines)}'
+    cats = report.categories()
+    for expected in ('Wall / Rail Framing', 'Drywall & Finishing',
+                     'Flooring', 'HVAC (Rough)', 'Concrete & Footings'):
+        assert expected in cats, f'Missing category on blank canvas: {expected}'
+
+def s17_foundation_types_no_crash():
+    """All 4 foundation types run on a blank canvas without error."""
+    room = [{'type': 'room', 'x': 0, 'y': 0, 'w': 240, 'h': 288, 'label': 'test'}]
+    for ftype in ('posts', 'footer_block', 'slab', 'concrete_wall'):
+        s = EstimatorSettings(foundation_type=ftype, include_concrete=True,
+                              footing_depth_in=24)
+        report = MaterialEstimator().run(room, s)
+        conc_lines = [ln for ln in report.lines if ln.category == 'Concrete & Footings']
+        assert conc_lines, f'No Concrete lines for foundation_type={ftype}'
+
+def s17_multi_section_synthesis():
+    """Multiple building sections produce additive area > single section."""
+    single = EstimatorSettings(
+        building_sections=[{'label': 'Main', 'width_ft': 24.0, 'length_ft': 32.0}],
+        include_flooring=True, include_drywall=True,
+    )
+    multi = EstimatorSettings(
+        building_sections=[
+            {'label': 'Main',   'width_ft': 24.0, 'length_ft': 32.0},
+            {'label': 'Garage', 'width_ft': 20.0, 'length_ft': 22.0},
+        ],
+        include_flooring=True, include_drywall=True,
+    )
+    r_single = MaterialEstimator().run([], single)
+    r_multi  = MaterialEstimator().run([], multi)
+    def floor_boxes(r):
+        for ln in r.lines:
+            if ln.category == 'Flooring' and ln.unit == 'boxes':
+                return float(ln.qty)
+        return 0.0
+    assert floor_boxes(r_multi) > floor_boxes(r_single), \
+        'Multi-section should produce more flooring boxes than single section'
+
+def s17_trade_isolation_flooring_only():
+    """Turning on a single trade must not emit other trades' line items."""
+    s = EstimatorSettings(
+        include_substructure=False, include_decking=False, include_walls=False,
+        include_hardware=False, include_concrete=False, include_roof=False,
+        include_finish=False, include_electrical=False, include_drywall=False,
+        include_insulation=False, include_flooring=True,
+        include_doors_windows=False, include_siding=False, include_roofing=False,
+        include_trim=False, include_plumbing=False, include_hvac=False,
+    )
+    report = MaterialEstimator().run([], s)
+    cats = set(report.categories())
+    assert cats == {'Flooring'}, f'expected only Flooring, got {cats}'
+
+def s17_trade_isolation_drywall_no_batts():
+    """Drywall trade must not include batt insulation or OSB sheathing."""
+    s = EstimatorSettings(
+        include_substructure=False, include_decking=False, include_walls=False,
+        include_hardware=False, include_concrete=False, include_roof=False,
+        include_finish=False, include_electrical=False, include_drywall=True,
+        include_insulation=False, include_flooring=False,
+        include_doors_windows=False, include_siding=False, include_roofing=False,
+        include_trim=False, include_plumbing=False, include_hvac=False,
+    )
+    report = MaterialEstimator().run([], s)
+    blob = ' '.join(ln.description.lower() for ln in report.lines)
+    assert 'batt' not in blob, 'batt insulation leaked into drywall trade'
+    assert 'osb' not in blob, 'OSB sheathing leaked into drywall trade'
+    assert any(ln.category == 'Drywall & Finishing' for ln in report.lines)
+
+def s17_window_synth_is_width_not_square():
+    """Synthesized windows are a 36\" wide unit, not a 36×36 diagonal."""
+    s = EstimatorSettings(
+        include_substructure=False, include_decking=False, include_walls=False,
+        include_hardware=False, include_concrete=False, include_roof=False,
+        include_finish=False, include_electrical=False, include_drywall=False,
+        include_insulation=False, include_flooring=False,
+        include_doors_windows=True, include_siding=False, include_roofing=False,
+        include_trim=False, include_plumbing=False, include_hvac=False,
+        window_count=1, door_count=0,
+    )
+    report = MaterialEstimator().run([], s)
+    win_lines = [ln for ln in report.lines
+                 if ln.category == 'Doors & Windows' and 'window unit' in ln.description]
+    assert win_lines, 'expected a window unit line'
+    assert '36"' in win_lines[0].description, win_lines[0].description
+    assert '50"' not in win_lines[0].description
+
+def s17_slab_skips_joists_and_posts():
+    """Slab foundation must not emit joists, posts, or joist hangers."""
+    s = EstimatorSettings(
+        foundation_type='slab', include_concrete=True, include_hardware=True,
+        include_substructure=True, include_decking=True,
+        include_walls=False, include_drywall=False, include_insulation=False,
+        include_flooring=False, include_doors_windows=False, include_siding=False,
+        include_roof=False, include_roofing=False, include_trim=False,
+        include_finish=False, include_electrical=False, include_plumbing=False,
+        include_hvac=False,
+    )
+    report = MaterialEstimator().run([], s)
+    blob = ' '.join(ln.description.lower() for ln in report.lines)
+    assert 'joist' not in blob, 'joists leaked onto a slab'
+    assert 'post ×' not in blob and 'post x' not in blob
+    assert 'hanger' not in blob, 'joist hangers leaked onto a slab'
+    assert any(ln.category == 'Concrete & Footings' for ln in report.lines)
+
+def s17_stud_cut_uses_plate_count():
+    """Single top plate must cut studs longer than a double top plate."""
+    room = [{'type': 'room', 'x': 0, 'y': 0, 'w': 240, 'h': 288}]
+    walls = [
+        {'type': 'wall', 'x1': 0, 'y1': 0, 'x2': 240, 'y2': 0},
+        {'type': 'wall', 'x1': 0, 'y1': 0, 'x2': 0, 'y2': 288},
+        {'type': 'wall', 'x1': 240, 'y1': 0, 'x2': 240, 'y2': 288},
+        {'type': 'wall', 'x1': 0, 'y1': 288, 'x2': 240, 'y2': 288},
+    ]
+    base = dict(include_substructure=False, include_decking=False,
+                include_walls=True, include_hardware=False, include_concrete=False,
+                include_roof=False, include_finish=False, include_electrical=False,
+                include_drywall=False, include_insulation=False, include_flooring=False,
+                include_doors_windows=False, include_siding=False, include_roofing=False,
+                include_trim=False, include_plumbing=False, include_hvac=False,
+                ceiling_ht_ft=8.0, waste_pct=0)
+    r1 = MaterialEstimator().run(room + walls, EstimatorSettings(plate_count=1, **base))
+    r2 = MaterialEstimator().run(room + walls, EstimatorSettings(plate_count=2, **base))
+    def _stud_desc(r):
+        for ln in r.lines:
+            if 'stud ×' in ln.description or 'stud x' in ln.description.lower():
+                return ln.description
+        return ''
+    # 8 ft − 2×1.5" = 7.75 → 8 ft stock; 8 ft − 3×1.5" = 7.625 → still 8 ft
+    # with [8,10,12,16] both round to 8. Count of top-plate lines differs.
+    top1 = sum(1 for ln in r1.lines if 'top plate' in ln.description or 'cap plate' in ln.description)
+    top2 = sum(1 for ln in r2.lines if 'top plate' in ln.description or 'cap plate' in ln.description)
+    assert top1 == 1, f'single top plate expected 1 line, got {top1}'
+    assert top2 == 2, f'double top plate expected 2 lines, got {top2}'
+
+for _name, _fn in [
+    ('LumberSchedule.round_up basic',            s17_round_up_basic),
+    ('LumberSchedule.summarize grouping',         s17_summarize),
+    ('post grid: corners always included',        s17_post_grid_corners),
+    ('post grid: zero-size no crash',             s17_post_grid_zero),
+    ('joist count 120x96 @ 16" o.c.',            s17_joist_count),
+    ('band board count per JoistFillItem',        s17_band_count),
+    ('blocking triggered span > 96 in',           s17_blocking_triggered),
+    ('no blocking for short span',                s17_no_blocking_short),
+    ('deck board count from known area',          s17_deck_boards),
+    ('plywood sheet count rounds up',             s17_plywood_roundup),
+    ('concrete volume formula (1 footing)',       s17_concrete_volume),
+    ('full estimator run no crash',               s17_full_run_no_crash),
+    ('all new categories present in output',      s17_new_categories_present),
+    ('flooring types: lvp/tile/carpet/hardwood',  s17_flooring_types_no_crash),
+    ('plumbing stub: empty rooms -> no output',   s17_plumbing_empty_rooms),
+    ('synthesis: blank canvas uses settings',     s17_synthesis_blank_canvas),
+    ('foundation types: all 4 produce output',    s17_foundation_types_no_crash),
+    ('multi-section synthesis: additive area',    s17_multi_section_synthesis),
+    ('isolation: flooring only',                  s17_trade_isolation_flooring_only),
+    ('isolation: drywall has no batts/OSB',       s17_trade_isolation_drywall_no_batts),
+    ('synth window is 36" wide not diagonal',     s17_window_synth_is_width_not_square),
+    ('slab skips joists/posts/hangers',           s17_slab_skips_joists_and_posts),
+    ('stud cut respects plate count',             s17_stud_cut_uses_plate_count),
+]:
+    chk(_name, _fn)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Section 18 — Code Compliance Engine  (12 tests)
+# ─────────────────────────────────────────────────────────────────────────────
+
+from code_tables import (
+    min_deck_joist, min_floor_joist, min_rafter,
+    min_footing_dia, max_cantilever, blocking_rows_required,
+    header_size as code_header_size,
+    rafter_length, KY_DEFAULTS,
+)
+from estimator import CodeChecker, CodeIssue, CodeReport
+
+# 18-01  min_deck_joist: known span + spacing → expected size
+def s18_min_deck_joist_known():
+    # 2×8 SP @ 16" spans up to 11.8 ft; 12 ft exceeds that → needs 2x10
+    result = min_deck_joist(12.0, 16)
+    assert result == '2x10', f'expected 2x10 for 12 ft @ 16", got {result}'
+
+# 18-02  min_deck_joist: span exceeding all table entries → returns '2x12+'
+def s18_min_deck_joist_exceeds():
+    result = min_deck_joist(25.0, 16)
+    assert result == '2x12+', f'expected 2x12+ for 25 ft span, got {result}'
+
+# 18-03  min_footing_dia: tributary area boundary
+def s18_footing_dia_boundary():
+    assert min_footing_dia(40)  == 12, 'expected 12" for 40 sqft'
+    assert min_footing_dia(41)  == 14, 'expected 14" for 41 sqft'
+    assert min_footing_dia(200) == 28, 'expected 28" for 200 sqft (max)'
+
+# 18-04  blocking_rows_required: short/medium/long
+def s18_blocking_rows():
+    assert blocking_rows_required(84) == 0,  'short span (7 ft) → 0 rows'
+    assert blocking_rows_required(120) == 1, '10 ft span → 1 row'
+    assert blocking_rows_required(216) == 2, '18 ft span → 2 rows'
+
+# 18-05  max_cantilever: 2×10 → actual depth 9.25 in
+def s18_max_cantilever_2x10():
+    result = max_cantilever('2x10')
+    assert abs(result - 9.25) < 0.01, f'expected 9.25" for 2x10, got {result}'
+
+# 18-06  max_cantilever: 2×12 → 11.25 in
+def s18_max_cantilever_2x12():
+    result = max_cantilever('2x12')
+    assert abs(result - 11.25) < 0.01, f'expected 11.25" for 2x12, got {result}'
+
+# 18-07  min_rafter: known 12 ft run @ 16" → should return 2x6 (16.2 ft table max)
+def s18_min_rafter():
+    result = min_rafter(12.0, 16)
+    assert result in ('2x6', '2x8'), f'expected 2x6 or 2x8 for 12 ft @ 16", got {result}'
+
+# 18-08  rafter_length geometry: flat roof (pitch=0) → length = run + overhang
+def s18_rafter_length_flat():
+    length = rafter_length(half_span_ft=10.0, pitch=0, overhang_in=24)
+    expected = 10.0 + 24/12   # 12.0 ft
+    assert abs(length - expected) < 0.01, f'expected {expected}, got {length}'
+
+# 18-09  CodeChecker: joist within table → OK
+def s18_codechecker_joist_ok():
+    items = [{'type': 'joist_fill', 'x': 0, 'y': 0, 'w': 96, 'h': 96,
+              'direction': 'h', 'spacing': 16, 'joist_size': '2x10',
+              'blocking_rows': 0, 'cantilever_in': 0}]
+    settings = EstimatorSettings()
+    report = CodeChecker().run(items, settings, KY_DEFAULTS)
+    joist_issues = [i for i in report.issues if i.element == 'Joist Fill']
+    assert joist_issues, 'should have at least one joist issue'
+    assert joist_issues[0].severity == 'OK', \
+        f'8 ft span with 2x10 should be OK, got {joist_issues[0].severity}'
+
+# 18-10  CodeChecker: joist oversized span → ERROR
+def s18_codechecker_joist_error():
+    items = [{'type': 'joist_fill', 'x': 0, 'y': 0, 'w': 360, 'h': 96,
+              'direction': 'h', 'spacing': 16, 'joist_size': '2x6',
+              'blocking_rows': 0, 'cantilever_in': 0}]
+    settings = EstimatorSettings()
+    report = CodeChecker().run(items, settings, KY_DEFAULTS)
+    joist_issues = [i for i in report.issues if i.element == 'Joist Fill']
+    assert joist_issues[0].severity == 'ERROR', \
+        f'30 ft span with 2x6 should be ERROR, got {joist_issues[0].severity}'
+
+# 18-11  CodeChecker: cantilever violation
+def s18_codechecker_cantilever():
+    items = [{'type': 'joist_fill', 'x': 0, 'y': 0, 'w': 96, 'h': 96,
+              'direction': 'h', 'spacing': 16, 'joist_size': '2x8',
+              'blocking_rows': 0, 'cantilever_in': 36}]  # 36" > 7.25" limit
+    settings = EstimatorSettings()
+    report = CodeChecker().run(items, settings, KY_DEFAULTS)
+    cant_issues = [i for i in report.issues if i.element == 'Cantilever']
+    assert cant_issues, 'should have a cantilever issue'
+    assert cant_issues[0].severity == 'ERROR', \
+        f'36" cantilever on 2x8 (max 7.25") should be ERROR'
+
+# 18-12  CodeReport.to_csv: produces valid CSV with header row
+def s18_code_report_csv():
+    report = CodeReport()
+    report.add('Joist Fill', 'bay 1', 'test check', '2x10', '2x6', 'ERROR')
+    report.add('Footing', 'post 1', 'dia check', '16"', '12"', 'WARN')
+    csv_text = report.to_csv()
+    lines = csv_text.strip().split('\n')
+    assert lines[0].startswith('Element'), f'first CSV line should be header, got: {lines[0]}'
+    assert len(lines) == 3, f'expected 3 CSV lines (header + 2 data), got {len(lines)}'
+
+for _name, _fn in [
+    ('min_deck_joist: 12 ft @ 16" -> 2x8',        s18_min_deck_joist_known),
+    ('min_deck_joist: 25 ft -> 2x12+',             s18_min_deck_joist_exceeds),
+    ('min_footing_dia: boundary conditions',       s18_footing_dia_boundary),
+    ('blocking_rows_required: short/mid/long',     s18_blocking_rows),
+    ('max_cantilever: 2x10 = 9.25"',               s18_max_cantilever_2x10),
+    ('max_cantilever: 2x12 = 11.25"',              s18_max_cantilever_2x12),
+    ('min_rafter: 12 ft @ 16" -> 2x6/2x8',         s18_min_rafter),
+    ('rafter_length flat: run + overhang',         s18_rafter_length_flat),
+    ('CodeChecker: 8 ft joist span -> OK',          s18_codechecker_joist_ok),
+    ('CodeChecker: 30 ft with 2x6 -> ERROR',        s18_codechecker_joist_error),
+    ('CodeChecker: 36" cantilever on 2x8 -> ERROR', s18_codechecker_cantilever),
+    ('CodeReport.to_csv: header + 2 data rows',    s18_code_report_csv),
 ]:
     chk(_name, _fn)
 

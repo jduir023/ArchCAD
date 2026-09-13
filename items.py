@@ -11,6 +11,155 @@ from PyQt6.QtCore    import Qt, QRectF, QLineF, QPointF
 from PyQt6.QtGui     import (QPen, QBrush, QColor, QPainterPath,
                               QPolygonF, QFont, QFontMetricsF, QUndoCommand)
 
+# ── Rotation undo command (used by _RotatableMixin) ───────────────────────────
+
+class _RotateItemCmd(QUndoCommand):
+    """Push after a drag-rotate gesture to make it undoable."""
+    def __init__(self, item, old_angle: float, new_angle: float, parent=None):
+        super().__init__('Rotate', parent)
+        self._item = item
+        self._old  = old_angle
+        self._new  = new_angle
+
+    def undo(self): self._item.setRotation(self._old)
+    def redo(self): self._item.setRotation(self._new)
+
+
+# ── Drag-rotation handle mixin ────────────────────────────────────────────────
+
+class _RotatableMixin:
+    """
+    Adds a visible rotation-handle dot above the selected item.
+    The user clicks and drags it to rotate around _rot_pivot_local().
+
+    Subclasses must call _rot_setup() from __init__ and implement:
+        _rot_pivot_local()  → QPointF   pivot point in item coords
+        _rot_handle_local() → QPointF   handle circle centre in item coords
+    They must also expand boundingRect() to include the handle area.
+    """
+    _ROT_R = 6   # handle circle radius (cosmetic pixels)
+
+    def _rot_setup(self):
+        self._rotating           = False
+        self._rot_start_angle    = 0.0
+        self._rot_start_rotation = 0.0
+        self.setAcceptHoverEvents(True)
+
+    # ── subclass interface ────────────────────────────────────────────────────
+
+    def _rot_pivot_local(self) -> QPointF:
+        raise NotImplementedError
+
+    def _rot_handle_local(self) -> QPointF:
+        raise NotImplementedError
+
+    # ── hit-test ──────────────────────────────────────────────────────────────
+
+    def _near_rot_handle(self, local_pos: QPointF) -> bool:
+        hp = self._rot_handle_local()
+        dx = local_pos.x() - hp.x()
+        dy = local_pos.y() - hp.y()
+        return (dx * dx + dy * dy) <= (self._ROT_R + 5) ** 2
+
+    # ── drawing ───────────────────────────────────────────────────────────────
+
+    def _draw_rot_handle(self, painter):
+        if not self.isSelected():
+            return
+        hp = self._rot_handle_local()
+        r  = self._ROT_R
+
+        # Dashed stem from bounding-rect top-centre to handle
+        br = self.boundingRect()
+        stem_base = QPointF((br.left() + br.right()) / 2, br.top() + 2)
+        stem_pen  = QPen(SEL_COLOR, 1)
+        stem_pen.setCosmetic(True)
+        stem_pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(stem_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawLine(QLineF(stem_base, hp))
+
+        # Handle circle
+        cp = QPen(SEL_COLOR, 1.5)
+        cp.setCosmetic(True)
+        painter.setPen(cp)
+        painter.setBrush(QBrush(QColor(20, 28, 52, 210)))
+        painter.drawEllipse(QRectF(hp.x() - r, hp.y() - r, r * 2, r * 2))
+
+        # Two short rotation-arrow arcs inside the circle
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        ar = r - 1.5
+        arc_pen = QPen(SEL_COLOR, 1)
+        arc_pen.setCosmetic(True)
+        painter.setPen(arc_pen)
+        for start_deg in (20, 200):
+            arc_path = QPainterPath()
+            arc_path.arcMoveTo(hp.x() - ar, hp.y() - ar, ar * 2, ar * 2, start_deg)
+            arc_path.arcTo(QRectF(hp.x() - ar, hp.y() - ar, ar * 2, ar * 2),
+                           start_deg, 120)
+            painter.drawPath(arc_path)
+
+    # ── mouse events ─────────────────────────────────────────────────────────
+
+    def mousePressEvent(self, event):
+        if (self.isSelected()
+                and event.button() == Qt.MouseButton.LeftButton
+                and self._near_rot_handle(event.pos())):
+            self._rotating = True
+            pivot = self.mapToScene(self._rot_pivot_local())
+            m = event.scenePos()
+            self._rot_start_angle    = math.degrees(
+                math.atan2(m.y() - pivot.y(), m.x() - pivot.x()))
+            self._rot_start_rotation = self.rotation()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._rotating:
+            pivot = self.mapToScene(self._rot_pivot_local())
+            m = event.scenePos()
+            cur_angle = math.degrees(
+                math.atan2(m.y() - pivot.y(), m.x() - pivot.x()))
+            self.setRotation(self._rot_start_rotation
+                             + (cur_angle - self._rot_start_angle))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._rotating:
+            self._rotating = False
+            old = self._rot_start_rotation
+            new = self.rotation()
+            if abs(new - old) > 0.05:
+                # Navigate up to the canvas to access the undo stack
+                scene = self.scene()
+                stk = None
+                if scene:
+                    views = scene.views()
+                    if views and hasattr(views[0], '_undo_stack'):
+                        stk = views[0]._undo_stack
+                if stk is not None:
+                    # Revert → push undoable cmd → reapply via cmd
+                    self.setRotation(old)
+                    stk.push(_RotateItemCmd(self, old, new))
+                # else: rotation stays applied; no undo record (e.g. in tests)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def hoverMoveEvent(self, event):
+        if self.isSelected() and self._near_rot_handle(event.pos()):
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.unsetCursor()
+        super().hoverMoveEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        self.unsetCursor()
+        super().hoverLeaveEvent(event)
+
 # ── Colours / styles ──────────────────────────────────────────────────────────
 
 WALL_COLOR  = QColor('#e0e8f0')
@@ -29,6 +178,31 @@ ROOM_BORDER = QColor('#e0e8f0')
 ROOM_BW     = 2          # cosmetic px
 
 SEL_COLOR   = QColor('#ff6600')
+
+# ── Print / PDF / PNG paper mode (dark ink on white) ──────────────────────────
+PRINT_MODE = False
+
+
+def set_print_mode(enabled: bool) -> None:
+    """Switch item paint colours between on-screen (light-on-dark) and paper."""
+    global PRINT_MODE, _LBL_BG, _LBL_PEN
+    PRINT_MODE = bool(enabled)
+    if PRINT_MODE:
+        _LBL_BG  = QColor(255, 255, 255, 230)
+        _LBL_PEN = QPen(QColor('#111111'), 0)
+    else:
+        _LBL_BG  = QColor(20, 28, 42, 210)
+        _LBL_PEN = QPen(QColor('#ffffff'), 0)
+
+
+def _ink(selected: bool = False, light: str = '#e0e8f0') -> QColor:
+    """Stroke colour: orange if selected, black on paper, light on the dark canvas."""
+    if selected:
+        return SEL_COLOR
+    if PRINT_MODE:
+        c = QColor(light)
+        return QColor('#111111') if c.lightness() > 140 else c
+    return QColor(light)
 
 
 # ── Selection highlight helper ────────────────────────────────────────────────
@@ -94,12 +268,19 @@ class RoomItem(_SelectableMixin, QGraphicsRectItem):
         h = r.height() / 12
         return f"Room\n  {_ft(w)} × {_ft(h)}"
     def paint(self, painter, option, widget=None):
-        super().paint(painter, option, widget)
+        if PRINT_MODE:
+            pen = QPen(_ink(self.isSelected()), ROOM_BW)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            painter.setBrush(QBrush(QColor(0, 0, 0, 10)))
+            painter.drawRect(self.rect())
+        else:
+            super().paint(painter, option, widget)
         r  = self.rect()
         rw, rh = r.width(), r.height()
         font = QFont('Arial'); font.setPixelSize(9)
         painter.setFont(font)
-        painter.setPen(QPen(QColor('#e0e8f0'), 0))
+        painter.setPen(QPen(_ink(self.isSelected()), 0))
         if self.label:
             painter.drawText(
                 QRectF(4, 4, rw - 8, rh - 8),
@@ -163,7 +344,15 @@ class WallItem(_SelectableMixin, QGraphicsLineItem):
         return super().boundingRect().adjusted(-4, -30, 4, 4)
 
     def paint(self, painter, option, widget=None):
-        super().paint(painter, option, widget)
+        if PRINT_MODE:
+            _, thickness, _ = WALL_TYPES.get(self.wall_type, WALL_TYPES['interior'])
+            pen = QPen(_ink(self.isSelected()), thickness)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.drawLine(self.line())
+        else:
+            super().paint(painter, option, widget)
         ln = self.line()
         mx = (ln.x1() + ln.x2()) / 2
         my = (ln.y1() + ln.y2()) / 2
@@ -172,37 +361,67 @@ class WallItem(_SelectableMixin, QGraphicsLineItem):
 
 # ── Door ─────────────────────────────────────────────────────────────────────
 
-class DoorItem(_SelectableMixin, QGraphicsItem):
+class DoorItem(_SelectableMixin, _RotatableMixin, QGraphicsItem):
     item_type     = 'door'
     DEFAULT_WIDTH = 36   # 3 ft
+
+    _ROT_OFFSET = 20   # gap between arc tip and handle, cosmetic px
 
     def __init__(self, width: float = 36):
         QGraphicsItem.__init__(self)
         self._setup_base()
+        self._rot_setup()
         self.door_width = float(width)
+
+    # ── rotation handle positions ─────────────────────────────────────────────
+
+    def _rot_pivot_local(self) -> QPointF:
+        return QPointF(0.0, 0.0)   # hinge
+
+    def _rot_handle_local(self) -> QPointF:
+        w = self.door_width
+        return QPointF(w / 2, -(w + 4 + self._ROT_OFFSET))
 
     def boundingRect(self) -> QRectF:
         w, m = self.door_width, 4
-        # Panel (0,0)→(w,0); arc sweeps CCW to (0,−w)
-        return QRectF(-m, -w - m, w + m * 2, w + m * 2)
+        jl    = 8   # jamb tick half-length
+        extra = self._ROT_OFFSET + self._ROT_R + 4
+        # left=-8 covers hinge jamb; right=w+12 covers labels; bottom=28 covers jamb+labels
+        return QRectF(-jl, -w - m - extra, w + jl + m + 8, w + m * 2 + extra + 20)
 
     def paint(self, painter, option, widget=None):
         w   = self.door_width
-        col = SEL_COLOR if self.isSelected() else QColor('#e0e8f0')
+        col = _ink(self.isSelected())
         pen = QPen(col, 2)
         pen.setCosmetic(True)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        # Door panel (closed, pointing right)
+
+        jl = 8   # jamb tick half-length in local units
+        # Jamb tick at hinge end
+        painter.drawLine(QLineF(0, -jl, 0, jl))
+        # Jamb tick at latch end
+        painter.drawLine(QLineF(w, -jl, w, jl))
+
+        # Door leaf (closed position, along +x)
         painter.drawLine(QLineF(0, 0, w, 0))
-        # Swing arc: 0° → +90° CCW  →  (w,0) to (0,−w)  [upward on screen]
+        # Swing arc: (w,0) → (0,−w) quarter circle CCW
         path = QPainterPath()
         path.moveTo(w, 0)
         path.arcTo(QRectF(-w, -w, 2 * w, 2 * w), 0, 90)
         painter.drawPath(path)
         # Hinge dot
         painter.drawEllipse(QRectF(-3, -3, 6, 6))
-        _lbl(painter, f'{int(w)}"', w / 2, 10)
+
+        # Labels: feet above arc top-left; width and depth in inches stacked at hinge-right
+        in_str = f'{int(w)}"'
+        ft_str = _ft(w / 12)
+        _lbl(painter, ft_str,  w / 2 - 8,  -(w + 12))   # feet — above arc, left-of-centre
+        _lbl(painter, in_str,  w / 2 + 6,  -10)          # inches width — above door leaf
+        _lbl(painter, in_str,  w / 2 + 6,   10)          # inches depth — below door leaf
+
+        # Rotation handle (only when selected)
+        self._draw_rot_handle(painter)
 
     def to_dict(self) -> dict:
         p = self.pos()
@@ -270,7 +489,7 @@ class WindowItem(_SelectableMixin, QGraphicsItem):
         if not corners:
             return
         c1, c2, c3, c4 = corners
-        col = SEL_COLOR if self.isSelected() else QColor('#e0e8f0')
+        col = _ink(self.isSelected())
         pen = QPen(col, 2)
         pen.setCosmetic(True)
         painter.setPen(pen)
@@ -279,7 +498,7 @@ class WindowItem(_SelectableMixin, QGraphicsItem):
         poly = QPolygonF([c1, c4, c3, c2])
         painter.drawPolygon(poly)
         # Glass centre line
-        glass = QPen(QColor('#90bce0') if not self.isSelected() else SEL_COLOR, 1)
+        glass = QPen(_ink(self.isSelected(), '#90bce0'), 1)
         glass.setCosmetic(True)
         painter.setPen(glass)
         painter.drawLine(QLineF(0, 0, self.dx, self.dy))
@@ -340,7 +559,7 @@ class DimensionItem(_SelectableMixin, QGraphicsItem):
         L = math.hypot(self.dx, self.dy)
         if L < 0.1:
             return
-        col = SEL_COLOR if self.isSelected() else QColor('#e0e8f0')
+        col = _ink(self.isSelected())
         pen = QPen(col, 1)
         pen.setCosmetic(True)
         painter.setPen(pen)
@@ -386,9 +605,8 @@ class DimensionItem(_SelectableMixin, QGraphicsItem):
         painter.setFont(font)
         fm  = QFontMetricsF(font)
         tw  = fm.horizontalAdvance(label)
-        painter.fillRect(QRectF(-tw / 2 - 2, -14, tw + 4, 12),
-                         QColor(30, 37, 51, 230))
-        painter.setPen(QPen(QColor('#ffffff'), 0))
+        painter.fillRect(QRectF(-tw / 2 - 2, -14, tw + 4, 12), _LBL_BG)
+        painter.setPen(_LBL_PEN)
         painter.drawText(QPointF(-tw / 2, -4), label)
         painter.restore()
 
@@ -425,14 +643,16 @@ class PostItem(_SelectableMixin, QGraphicsItem):
 
     def boundingRect(self) -> QRectF:
         s, m = self.post_size, 4
-        return QRectF(-s / 2 - m, -s / 2 - m, s + m * 2, s + m * 2)
+        return QRectF(-s / 2 - m, -s / 2 - m, s + m * 2, s + m * 2 + 20)
 
     def paint(self, painter, option, widget=None):
         s   = self.post_size
-        col = SEL_COLOR if self.isSelected() else QColor('#5a3a10')
+        col = _ink(self.isSelected(), '#5a3a10')
         pen = QPen(col, 1.5)
         pen.setCosmetic(True)
-        fill = QColor(180, 130, 60, 200) if not self.isSelected() else SEL_COLOR
+        fill = (SEL_COLOR if self.isSelected()
+                else (QColor(220, 220, 220, 180) if PRINT_MODE
+                      else QColor(180, 130, 60, 200)))
         painter.setPen(pen)
         painter.setBrush(QBrush(fill))
         painter.drawRect(QRectF(-s / 2, -s / 2, s, s))
@@ -475,6 +695,7 @@ class JoistFillItem(_SelectableMixin, QGraphicsItem):
         self.h         = float(h)          # region height (always >= 0)
         self.spacing   = float(spacing)    # centre-to-centre, inches
         self.direction = direction         # 'h' = horiz joists, 'v' = vert
+        self.label     = ''               # user-set section name
 
     def boundingRect(self) -> QRectF:
         m = 4
@@ -483,14 +704,15 @@ class JoistFillItem(_SelectableMixin, QGraphicsItem):
     def paint(self, painter, option, widget=None):
         if self.w < 1 or self.h < 1:
             return
-        col = SEL_COLOR if self.isSelected() else QColor('#e0e8f0')
+        col = _ink(self.isSelected())
 
         # Dashed bounding rectangle
         pen = QPen(col, 1)
         pen.setCosmetic(True)
         pen.setStyle(Qt.PenStyle.DashLine)
         painter.setPen(pen)
-        painter.setBrush(QBrush(QColor(40, 60, 95, 30)))
+        painter.setBrush(QBrush(QColor(0, 0, 0, 12) if PRINT_MODE
+                                else QColor(40, 60, 95, 30)))
         painter.drawRect(QRectF(0, 0, self.w, self.h))
 
         # Joist lines
@@ -520,6 +742,15 @@ class JoistFillItem(_SelectableMixin, QGraphicsItem):
         painter.setFont(font)
         painter.drawText(QPointF(4, 10), label)
 
+        # User section label (if set)
+        if getattr(self, 'label', ''):
+            font2 = QFont('Arial'); font2.setPixelSize(11); font2.setBold(True)
+            painter.setFont(font2)
+            painter.drawText(
+                QRectF(4, 16, self.w - 8, self.h - 20),
+                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                self.label)
+
     def to_dict(self) -> dict:
         p = self.pos()
         return {
@@ -529,12 +760,14 @@ class JoistFillItem(_SelectableMixin, QGraphicsItem):
             'w':         self.w, 'h': self.h,
             'spacing':   self.spacing,
             'direction': self.direction,
+            'label':     getattr(self, 'label', ''),
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> 'JoistFillItem':
         item = cls(d['w'], d['h'], d.get('spacing', 16), d.get('direction', 'h'))
         item.item_id = d['id']
+        item.label   = d.get('label', '')
         item.setPos(d['x'], d['y'])
         return item
 
@@ -569,12 +802,12 @@ class ShapeItem(_SelectableMixin, QGraphicsItem):
     def paint(self, painter, option, widget=None):
         if self.w < 1 or self.h < 1:
             return
-        b_col = SEL_COLOR if self.isSelected() else QColor(self.border)
+        b_col = _ink(self.isSelected(), self.border)
         pen   = QPen(b_col, 1.5)
         pen.setCosmetic(True)
         painter.setPen(pen)
-        f_col = QColor(self.fill)
-        f_col.setAlpha(180)
+        f_col = QColor('#f4f4f4') if PRINT_MODE else QColor(self.fill)
+        f_col.setAlpha(40 if PRINT_MODE else 180)
         painter.setBrush(QBrush(f_col))
         r = QRectF(0, 0, self.w, self.h)
         if self.shape_type == 'ellipse':
@@ -728,7 +961,15 @@ class LineItem(_SelectableMixin, QGraphicsLineItem):
         super().mouseReleaseEvent(event)
 
     def paint(self, painter, option, widget=None):
-        super().paint(painter, option, widget)
+        if PRINT_MODE:
+            old = self.pen()
+            p = QPen(_ink(self.isSelected(), self.line_color), old.widthF())
+            p.setCosmetic(True)
+            p.setStyle(old.style())
+            painter.setPen(p)
+            painter.drawLine(self.line())
+        else:
+            super().paint(painter, option, widget)
         ln = self.line()
         L  = ln.length()
         if L > 0.1:
@@ -797,7 +1038,7 @@ class TextItem(_SelectableMixin, QGraphicsItem):
         return QRectF(0, 0, fm.horizontalAdvance(self.text) + 10, fm.height() + 8)
 
     def paint(self, painter, option, widget=None):
-        col = SEL_COLOR if self.isSelected() else QColor(self.color)
+        col = _ink(self.isSelected(), self.color)
         if self.isSelected():
             painter.fillRect(self.boundingRect(), QColor(255, 200, 80, 55))
         painter.setFont(self._font())
@@ -840,6 +1081,7 @@ class GroupItem(QGraphicsItemGroup):
         super().__init__()
         self.item_id    = str(uuid.uuid4())
         self._layer_idx = 0
+        self._locked    = False
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable,    True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)

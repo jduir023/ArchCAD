@@ -41,10 +41,10 @@ class HRuler(QWidget):
         vph  = vp.height()
 
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor('#ebebea'))
+        painter.fillRect(self.rect(), QColor('#0a0a0a'))
 
         # Bottom border
-        painter.setPen(QPen(QColor('#aaaaaa'), 1))
+        painter.setPen(QPen(QColor('#2a2a2a'), 1))
         painter.drawLine(0, RULER_W - 1, self.width(), RULER_W - 1)
 
         # Visible scene range
@@ -70,13 +70,13 @@ class HRuler(QWidget):
             if -2 <= px <= self.width() + 2:
                 painter.setPen(QPen(QColor('#555555'), 1))
                 painter.drawLine(px, RULER_W // 2, px, RULER_W)
-                painter.setPen(QPen(QColor('#333333'), 1))
+                painter.setPen(QPen(QColor('#aaaaaa'), 1))
                 painter.drawText(px + 2, RULER_W - 4, f"{int(ft)}'")
             ft += step
 
         # Minor ticks (half step)
         ft = math.floor(scene_l / 12 / half) * half
-        painter.setPen(QPen(QColor('#aaaaaa'), 1))
+        painter.setPen(QPen(QColor('#333333'), 1))
         while ft * 12 <= scene_r + half * 12:
             px = int(v.mapFromScene(QPointF(ft * 12, 0)).x())
             if 0 <= px <= self.width():
@@ -100,10 +100,10 @@ class VRuler(QWidget):
         vph  = vp.height()
 
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor('#ebebea'))
+        painter.fillRect(self.rect(), QColor('#0a0a0a'))
 
         # Right border
-        painter.setPen(QPen(QColor('#aaaaaa'), 1))
+        painter.setPen(QPen(QColor('#2a2a2a'), 1))
         painter.drawLine(RULER_W - 1, 0, RULER_W - 1, self.height())
 
         scene_t = v.mapToScene(0, 0).y()
@@ -129,7 +129,7 @@ class VRuler(QWidget):
                 painter.setPen(QPen(QColor('#555555'), 1))
                 painter.drawLine(RULER_W // 2, py, RULER_W, py)
                 painter.save()
-                painter.setPen(QPen(QColor('#333333'), 1))
+                painter.setPen(QPen(QColor('#aaaaaa'), 1))
                 painter.translate(RULER_W - 4, py - 2)
                 painter.rotate(-90)
                 painter.drawText(0, 0, f"{int(ft)}'")
@@ -138,7 +138,7 @@ class VRuler(QWidget):
 
         # Minor ticks
         ft = math.floor(scene_t / 12 / half) * half
-        painter.setPen(QPen(QColor('#aaaaaa'), 1))
+        painter.setPen(QPen(QColor('#333333'), 1))
         while ft * 12 <= scene_b + half * 12:
             py = int(v.mapFromScene(QPointF(0, ft * 12)).y())
             if 0 <= py <= self.height():

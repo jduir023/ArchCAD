@@ -5,6 +5,7 @@ All dimensions in inches (scene units).  Top-down plan view.
 """
 
 import math
+import random
 import uuid
 
 from PyQt6.QtCore    import Qt, QRectF, QPointF, QLineF
@@ -12,7 +13,8 @@ from PyQt6.QtWidgets import QGraphicsItem
 from PyQt6.QtGui     import (QPen, QBrush, QColor, QPainterPath,
                               QPolygonF, QFont)
 
-from items import _SelectableMixin, SEL_COLOR, _ft
+import items as _items
+from items import _SelectableMixin, _RotatableMixin, SEL_COLOR, _ft
 
 # ── Colour palette ─────────────────────────────────────────────────────────────
 _FG    = QColor('#c8d8f0')
@@ -28,14 +30,30 @@ _STRUC = QColor('#b87050')
 
 # ── Pen / brush helpers ────────────────────────────────────────────────────────
 def _pen(sel, w=1.5, c=None):
-    p = QPen(SEL_COLOR if sel else (c or _FG), w)
+    if sel:
+        col = SEL_COLOR
+    elif _items.PRINT_MODE:
+        col = QColor('#111111')
+    else:
+        col = c or _FG
+    p = QPen(col, w)
     p.setCosmetic(True); return p
 
 def _pen2(sel, w=0.8, c=None):
-    p = QPen(SEL_COLOR if sel else (c or _FG2), w)
+    if sel:
+        col = SEL_COLOR
+    elif _items.PRINT_MODE:
+        col = QColor('#333333')
+    else:
+        col = c or _FG2
+    p = QPen(col, w)
     p.setCosmetic(True); return p
 
 def _br(c=None):
+    if _items.PRINT_MODE:
+        fill = QColor(c) if c is not None else QColor(230, 230, 230, 80)
+        fill.setAlpha(60)
+        return QBrush(fill)
     return QBrush(c or _FILL)
 
 # ── Common drawing primitives ─────────────────────────────────────────────────
@@ -1126,7 +1144,7 @@ def _draw_insul_blown(p, w, h, sel):
     p.setPen(_pen(sel, 1.2, _INSUL if not sel else None)); p.setBrush(_br(_FILL))
     p.drawRect(QRectF(0, 0, w, h))
     # random dots
-    import random; rng = random.Random(42)
+    rng = random.Random(42)
     p.setPen(_pen2(sel, 0.8, _INSUL if not sel else None)); p.setBrush(Qt.BrushStyle.NoBrush)
     n = max(10, int(w*h/25))
     for _ in range(n):
@@ -1202,6 +1220,458 @@ def _draw_beam_steel(p, w, h, sel):
     p.setPen(_pen2(sel, 0.8, _STRUC if not sel else None))
     p.drawLine(QLineF(0, h*0.25, w, h*0.25))
     p.drawLine(QLineF(0, h*0.75, w, h*0.75))
+    p.restore()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  FLOOR PLAN HELPERS  (Bedroom Layouts + Full Floor Plans)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _fp_pen_out(sel):
+    p = QPen(SEL_COLOR if sel else _FG,  2.5); p.setCosmetic(True); return p
+def _fp_pen_iw(sel):
+    p = QPen(SEL_COLOR if sel else _FG2, 1.8); p.setCosmetic(True); return p
+def _fp_pen_fix(sel):
+    p = QPen(SEL_COLOR if sel else _FG2, 1.0); p.setCosmetic(True); return p
+
+def _fp_out(p, w, h, sel):
+    p.setPen(_fp_pen_out(sel)); p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRect(QRectF(0, 0, w, h))
+
+def _fp_iwall(p, x1, y1, x2, y2, sel):
+    p.setPen(_fp_pen_iw(sel)); p.drawLine(QLineF(x1, y1, x2, y2))
+
+def _fp_win(p, x1, y1, x2, y2, sel):
+    """Window: two parallel lines + end caps."""
+    dx, dy = x2-x1, y2-y1; L = math.hypot(dx, dy)
+    if L < 0.1: return
+    ux, uy = dx/L, dy/L; px, py = -uy*3, ux*3
+    p.setPen(_fp_pen_fix(sel))
+    p.drawLine(QLineF(x1+px, y1+py, x2+px, y2+py))
+    p.drawLine(QLineF(x1-px, y1-py, x2-px, y2-py))
+    p.drawLine(QLineF(x1-px, y1-py, x1+px, y1+py))
+    p.drawLine(QLineF(x2-px, y2-py, x2+px, y2+py))
+
+def _fp_door(p, hx, hy, dw, panel_deg, sweep_deg, sel):
+    """Door arc. panel_deg=0 → panel goes east; sweep +/-90 typical."""
+    p.setPen(_fp_pen_fix(sel)); p.setBrush(Qt.BrushStyle.NoBrush)
+    ex = hx + dw * math.cos(math.radians(panel_deg))
+    ey = hy - dw * math.sin(math.radians(panel_deg))
+    p.drawLine(QLineF(hx, hy, ex, ey))
+    arc = QRectF(hx-dw, hy-dw, 2*dw, 2*dw)
+    path = QPainterPath(); path.arcMoveTo(arc, panel_deg); path.arcTo(arc, panel_deg, sweep_deg)
+    p.drawPath(path)
+
+def _fp_lbl(p, text, cx, cy, sel, sz=8):
+    f = QFont('Arial'); f.setPixelSize(max(1, sz)); p.setFont(f)
+    p.setPen(_fp_pen_fix(sel))
+    p.drawText(QRectF(cx-80, cy-sz//2-1, 160, sz+4), Qt.AlignmentFlag.AlignCenter, text)
+
+def _fp_bed(p, x, y, bw, bh, sel):
+    p.setPen(_fp_pen_fix(sel)); p.setBrush(QBrush(_FILL2))
+    p.drawRect(QRectF(x, y, bw, bh))
+    ph = bh*0.20; p.setBrush(QBrush(_FILL3))
+    p.drawRect(QRectF(x+bw*0.07, y+bh*0.04, bw*0.38, ph))
+    p.drawRect(QRectF(x+bw*0.55, y+bh*0.04, bw*0.38, ph))
+
+def _fp_cbox(p, x, y, cw, ch, sel):
+    p.setPen(_fp_pen_fix(sel)); p.setBrush(QBrush(_FILL2))
+    p.drawRect(QRectF(x, y, cw, ch))
+    for i in (0.33, 0.67): p.drawLine(QLineF(x, y+ch*i, x+cw, y+ch*i))
+
+def _fp_toilet_s(p, x, y, tw, th, sel):
+    p.setPen(_fp_pen_fix(sel)); p.setBrush(QBrush(_FILL2))
+    p.drawRect(QRectF(x, y, tw, th*0.34))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawEllipse(QRectF(x+tw*0.10, y+th*0.31, tw*0.80, th*0.66))
+
+def _fp_vanity_s(p, x, y, vw, vh, sel):
+    p.setPen(_fp_pen_fix(sel)); p.setBrush(QBrush(_FILL2))
+    p.drawRect(QRectF(x, y, vw, vh))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawEllipse(QRectF(x+vw*0.18, y+vh*0.16, vw*0.64, vh*0.68))
+
+def _fp_tub_s(p, x, y, tw, th, sel):
+    p.setPen(_fp_pen_fix(sel)); p.setBrush(QBrush(_FILL2))
+    p.drawRect(QRectF(x, y, tw, th))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRoundedRect(QRectF(x+tw*0.08, y+th*0.08, tw*0.84, th*0.84), 4, 4)
+
+def _fp_cntr(p, x, y, cw, ch, sel):
+    p.setPen(_fp_pen_fix(sel)); p.setBrush(QBrush(_FILL2))
+    p.drawRect(QRectF(x, y, cw, ch))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    r = min(cw, ch)*0.28
+    p.drawEllipse(QRectF(x+cw*0.5-r, y+ch*0.5-r, r*2, r*2))
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  BEDROOM LAYOUTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _draw_fp_bed_twin(p, w, h, sel):
+    """9'×10' twin bedroom."""
+    p.save(); sz = max(6, int(min(w, h)*0.06))
+    _fp_out(p, w, h, sel)
+    _fp_win(p, w*0.25, 0, w*0.65, 0, sel)
+    _fp_door(p, w, h, w*0.30, 180, -90, sel)
+    _fp_bed(p, w*0.05, h*0.06, w*0.34, h*0.58, sel)
+    ns = w*0.14
+    _fp_cbox(p, w*0.43, h*0.06, ns, ns, sel)
+    _fp_cbox(p, w*0.62, h*0.06, w*0.33, h*0.22, sel)
+    _fp_cbox(p, w*0.62, h*0.35, w*0.33, h*0.20, sel)
+    _fp_lbl(p, "9' × 10'", w/2, h*0.90, sel, sz)
+    p.restore()
+
+def _draw_fp_bed_standard(p, w, h, sel):
+    """11'×12' standard bedroom."""
+    p.save(); sz = max(6, int(min(w, h)*0.06))
+    _fp_out(p, w, h, sel)
+    _fp_win(p, w*0.25, 0, w*0.75, 0, sel)
+    _fp_door(p, 0, h, w*0.28, 0, 90, sel)
+    ns = min(w, h)*0.12
+    bx = ns + w*0.02
+    bw, bh = w*0.46, h*0.54
+    _fp_bed(p, bx, h*0.06, bw, bh, sel)
+    _fp_cbox(p, w*0.02, h*0.06, ns, ns, sel)
+    _fp_cbox(p, bx+bw+w*0.01, h*0.06, ns, ns, sel)
+    _fp_cbox(p, w*0.72, h*0.68, w*0.24, h*0.26, sel)
+    _fp_lbl(p, "11' × 12'", w/2, h*0.91, sel, sz)
+    p.restore()
+
+def _draw_fp_bed_large(p, w, h, sel):
+    """12'×14' bedroom with walk-in closet."""
+    p.save(); sz = max(6, int(min(w, h)*0.06))
+    _fp_out(p, w, h, sel)
+    cx, ch = w*0.65, h*0.27
+    _fp_iwall(p, cx, 0, cx, ch, sel)
+    _fp_iwall(p, cx, ch, w, ch, sel)
+    _fp_lbl(p, 'W.I.C.', cx+(w-cx)/2, ch/2, sel, sz-1)
+    _fp_door(p, cx, ch, w*0.17, 0, -90, sel)
+    _fp_win(p, 0, h*0.30, 0, h*0.70, sel)
+    _fp_door(p, w, h, w*0.28, 180, -90, sel)
+    _fp_bed(p, w*0.05, h*0.08, w*0.48, h*0.48, sel)
+    ns = min(w, h)*0.12
+    _fp_cbox(p, w*0.05, h*0.58, ns, ns, sel)
+    _fp_cbox(p, w*0.05, h*0.75, w*0.38, h*0.16, sel)
+    _fp_lbl(p, "12' × 14'  + WIC", w/2, h*0.94, sel, sz)
+    p.restore()
+
+def _draw_fp_bed_master(p, w, h, sel):
+    """14'×16' master bedroom with walk-in closet."""
+    p.save(); sz = max(6, int(min(w, h)*0.06))
+    _fp_out(p, w, h, sel)
+    cx = w*0.62
+    _fp_iwall(p, cx, 0, cx, h, sel)
+    _fp_lbl(p, 'W.I.C.', cx+(w-cx)/2, h/2, sel, sz-1)
+    _fp_door(p, cx, h*0.18, w*0.22, 0, 90, sel)
+    _fp_win(p, w*0.05, 0, w*0.50, 0, sel)
+    _fp_door(p, 0, h, w*0.26, 0, 90, sel)
+    _fp_bed(p, w*0.06, h*0.10, w*0.50, h*0.47, sel)
+    ns = min(w, h)*0.12
+    _fp_cbox(p, w*0.06, h*0.60, ns, ns, sel)
+    _fp_cbox(p, w*0.06+ns+w*0.02, h*0.60, ns, ns, sel)
+    _fp_cbox(p, w*0.06, h*0.76, w*0.40, h*0.16, sel)
+    _fp_lbl(p, "14' × 16'  + WIC", cx/2, h*0.94, sel, sz)
+    p.restore()
+
+def _draw_fp_bed_master_en(p, w, h, sel):
+    """14'×20' master with ensuite."""
+    p.save(); sz = max(6, int(min(w, h)*0.055))
+    dy = h*0.62
+    _fp_out(p, w, h, sel)
+    _fp_iwall(p, 0, dy, w, dy, sel)
+    # bedroom
+    _fp_win(p, w*0.12, 0, w*0.62, 0, sel)
+    _fp_door(p, 0, dy, w*0.22, 0, 90, sel)
+    cx = w*0.65
+    _fp_iwall(p, cx, 0, cx, dy, sel)
+    _fp_lbl(p, 'W.I.C.', cx+(w-cx)/2, dy*0.32, sel, sz-1)
+    _fp_door(p, cx, dy*0.08, w*0.22, 0, -90, sel)
+    _fp_bed(p, w*0.06, h*0.04, w*0.52, dy*0.66, sel)
+    _fp_lbl(p, 'BEDROOM', cx*0.40, dy*0.85, sel, sz)
+    # ensuite
+    _fp_lbl(p, 'ENSUITE', w/2, dy+(h-dy)*0.08, sel, sz-1)
+    _fp_door(p, w*0.34, dy, w*0.20, 0, -90, sel)
+    _fp_toilet_s(p, w*0.68, dy+h*0.04, w*0.20, (h-dy)*0.44, sel)
+    _fp_vanity_s(p, w*0.06, dy+h*0.04, w*0.36, (h-dy)*0.42, sel)
+    _fp_tub_s(p, w*0.60, dy+(h-dy)*0.52, w*0.35, (h-dy)*0.42, sel)
+    _fp_win(p, w*0.18, h, w*0.55, h, sel)
+    _fp_lbl(p, "14' × 20'  +Ensuite", w*0.32, h*0.97, sel, sz)
+    p.restore()
+
+def _draw_fp_bed_kids(p, w, h, sel):
+    """10'×12' kids / bunk room."""
+    p.save(); sz = max(6, int(min(w, h)*0.06))
+    _fp_out(p, w, h, sel)
+    _fp_win(p, w*0.20, 0, w*0.68, 0, sel)
+    _fp_door(p, w, h, w*0.30, 180, -90, sel)
+    bw = w*0.42; bh = h*0.53
+    _fp_bed(p, w*0.04, h*0.06, bw, bh, sel)
+    _fp_bed(p, w*0.50, h*0.06, bw, bh, sel)
+    _fp_cbox(p, w*0.04, h*0.68, w*0.44, h*0.18, sel)
+    _fp_cbox(p, w*0.54, h*0.68, w*0.40, h*0.18, sel)
+    _fp_lbl(p, "10' × 12'  Bunk Rm", w/2, h*0.92, sel, sz)
+    p.restore()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  FULL FLOOR PLANS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _draw_fp_home_2br_800(p, w, h, sel):
+    """2BR ~800 sqft  (28'×30')."""
+    p.save(); sz = max(6, int(min(w, h)*0.044))
+    _fp_out(p, w, h, sel)
+    yd = h*0.46
+    _fp_iwall(p, 0, yd, w, yd, sel)
+    xd1 = w*0.63
+    _fp_iwall(p, xd1, 0, xd1, yd, sel)
+    xb1, xb2 = w*0.44, w*0.69
+    _fp_iwall(p, xb1, yd, xb1, h, sel)
+    _fp_iwall(p, xb2, yd, xb2, h, sel)
+    # labels
+    _fp_lbl(p, 'LIVING', xd1*0.50, yd*0.36, sel, sz)
+    _fp_lbl(p, 'KITCHEN', (xd1+w)*0.50, yd*0.36, sel, sz)
+    _fp_lbl(p, 'BEDROOM 1', xb1*0.50, yd+(h-yd)*0.42, sel, sz)
+    _fp_lbl(p, 'BATH', (xb1+xb2)*0.50, yd+(h-yd)*0.45, sel, sz-1)
+    _fp_lbl(p, 'BEDROOM 2', (xb2+w)*0.50, yd+(h-yd)*0.42, sel, sz)
+    # fixtures
+    _fp_cntr(p, xd1, h*0.04, w-xd1, yd*0.30, sel)
+    _fp_toilet_s(p, xb1+w*0.03, yd+(h-yd)*0.07, (xb2-xb1)*0.46, (h-yd)*0.38, sel)
+    _fp_vanity_s(p, xb1+w*0.03, yd+(h-yd)*0.54, (xb2-xb1)*0.46, (h-yd)*0.36, sel)
+    # doors
+    _fp_door(p, w*0.82, 0, w*0.14, 270, -90, sel)
+    _fp_door(p, 0, yd, w*0.20, 0, -90, sel)
+    _fp_door(p, xb2, yd, w*0.20, 0, -90, sel)
+    # windows
+    _fp_win(p, w*0.08, 0, w*0.44, 0, sel)
+    _fp_win(p, 0, h*0.08, 0, h*0.36, sel)
+    _fp_win(p, 0, yd+h*0.06, 0, yd+h*0.32, sel)
+    _fp_win(p, w*0.72, h, w*0.93, h, sel)
+    p.restore()
+
+def _draw_fp_home_2br_1000(p, w, h, sel):
+    """2BR ~1000 sqft  (34'×30')."""
+    p.save(); sz = max(6, int(min(w, h)*0.040))
+    _fp_out(p, w, h, sel)
+    yd = h*0.48
+    _fp_iwall(p, 0, yd, w, yd, sel)
+    xg = w*0.28
+    _fp_iwall(p, xg, 0, xg, yd, sel)
+    xm, xhb = w*0.50, w*0.66
+    _fp_iwall(p, xm, yd, xm, h, sel)
+    _fp_iwall(p, xhb, yd, xhb, h, sel)
+    xba = xhb + (w-xhb)*0.46
+    _fp_iwall(p, xba, yd, xba, yd+(h-yd)*0.56, sel)
+    _fp_iwall(p, xhb, yd+(h-yd)*0.56, xba, yd+(h-yd)*0.56, sel)
+    # labels
+    _fp_lbl(p, 'GARAGE', xg/2, yd*0.38, sel, sz)
+    _fp_lbl(p, 'OPEN LIVING + KITCHEN', (xg+w)*0.50, yd*0.38, sel, sz)
+    _fp_lbl(p, 'MASTER', xm*0.50, yd+(h-yd)*0.50, sel, sz)
+    _fp_lbl(p, 'HALL', (xm+xhb)*0.50, yd+(h-yd)*0.38, sel, sz-1)
+    _fp_lbl(p, 'BATH', (xhb+xba)*0.50, yd+(h-yd)*0.28, sel, sz-1)
+    _fp_lbl(p, 'BED 2', (xba+w)*0.50, yd+(h-yd)*0.50, sel, sz-1)
+    # fixtures
+    _fp_toilet_s(p, xhb+w*0.01, yd+h*0.02, (xba-xhb)*0.50, (h-yd)*0.38, sel)
+    _fp_vanity_s(p, xhb+w*0.01, yd+(h-yd)*0.44, (xba-xhb)*0.65, (h-yd)*0.34, sel)
+    # doors
+    _fp_door(p, xg*0.46, 0, w*0.14, 270, -90, sel)
+    _fp_door(p, 0, yd, w*0.20, 0, -90, sel)
+    _fp_door(p, xhb, yd, w*0.18, 0, -90, sel)
+    # windows
+    _fp_win(p, w*0.36, 0, w*0.74, 0, sel)
+    _fp_win(p, 0, h*0.08, 0, h*0.36, sel)
+    _fp_win(p, 0, yd+h*0.08, 0, yd+h*0.32, sel)
+    _fp_win(p, (xba+w)*0.50-w*0.08, h, (xba+w)*0.50+w*0.08, h, sel)
+    p.restore()
+
+def _draw_fp_home_3br_1200(p, w, h, sel):
+    """3BR ~1200 sqft  (36'×34')."""
+    p.save(); sz = max(6, int(min(w, h)*0.038))
+    _fp_out(p, w, h, sel)
+    yd = h*0.44
+    _fp_iwall(p, 0, yd, w, yd, sel)
+    xk = w*0.58
+    _fp_iwall(p, xk, 0, xk, yd, sel)
+    xm, xb2, xb3 = w*0.42, w*0.64, w*0.82
+    _fp_iwall(p, xm, yd, xm, h, sel)
+    _fp_iwall(p, xb2, yd, xb2, h, sel)
+    _fp_iwall(p, xb3, yd, xb3, h, sel)
+    # master bath pocket top-left of bottom
+    xmb = xm*0.55
+    _fp_iwall(p, xmb, yd, xmb, yd+(h-yd)*0.54, sel)
+    _fp_iwall(p, 0, yd+(h-yd)*0.54, xmb, yd+(h-yd)*0.54, sel)
+    # hall bath
+    xhb = xm + (xb2-xm)*0.42
+    _fp_iwall(p, xhb, yd, xhb, yd+(h-yd)*0.56, sel)
+    _fp_iwall(p, xm, yd+(h-yd)*0.56, xhb, yd+(h-yd)*0.56, sel)
+    # labels
+    _fp_lbl(p, 'LIVING', xk*0.50, yd*0.38, sel, sz)
+    _fp_lbl(p, 'KITCHEN', (xk+w)*0.50, yd*0.38, sel, sz)
+    _fp_lbl(p, 'M.BATH', xmb*0.50, yd+(h-yd)*0.26, sel, sz-1)
+    _fp_lbl(p, 'MASTER', (xmb+xm)*0.50, yd+(h-yd)*0.72, sel, sz)
+    _fp_lbl(p, 'BATH', (xm+xhb)*0.50, yd+(h-yd)*0.28, sel, sz-1)
+    _fp_lbl(p, 'BED 2', (xb2+xm)*0.50+(xhb-xm)*0.30, yd+(h-yd)*0.72, sel, sz)
+    _fp_lbl(p, 'BED 3', (xb2+xb3)*0.50, yd+(h-yd)*0.50, sel, sz)
+    _fp_lbl(p, 'BED 4', (xb3+w)*0.50, yd+(h-yd)*0.50, sel, sz)
+    # fixtures
+    _fp_toilet_s(p, xmb*0.06, yd+h*0.02, xmb*0.48, (h-yd)*0.38, sel)
+    _fp_vanity_s(p, xmb*0.06, yd+(h-yd)*0.44, xmb*0.62, (h-yd)*0.34, sel)
+    _fp_toilet_s(p, xm+w*0.01, yd+h*0.02, (xhb-xm)*0.55, (h-yd)*0.38, sel)
+    _fp_vanity_s(p, xm+w*0.01, yd+(h-yd)*0.44, (xhb-xm)*0.70, (h-yd)*0.34, sel)
+    # doors
+    _fp_door(p, w*0.30, 0, w*0.14, 270, -90, sel)
+    _fp_door(p, xmb, yd+(h-yd)*0.54, w*0.18, 0, -90, sel)
+    _fp_door(p, xm, yd, w*0.16, 0, -90, sel)
+    _fp_door(p, xb2, yd, w*0.16, 0, -90, sel)
+    _fp_door(p, xb3, yd, w*0.16, 0, -90, sel)
+    # windows
+    _fp_win(p, w*0.06, 0, w*0.44, 0, sel)
+    _fp_win(p, w*0.68, 0, w*0.92, 0, sel)
+    _fp_win(p, 0, h*0.08, 0, h*0.34, sel)
+    _fp_win(p, 0, yd+h*0.06, 0, yd+h*0.30, sel)
+    _fp_win(p, w*0.08, h, w*0.36, h, sel)
+    _fp_win(p, w*0.66, h, w*0.92, h, sel)
+    p.restore()
+
+def _draw_fp_home_3br_1400(p, w, h, sel):
+    """3BR ~1400 sqft  (40'×36')."""
+    p.save(); sz = max(6, int(min(w, h)*0.038))
+    _fp_out(p, w, h, sel)
+    yd = h*0.54
+    _fp_iwall(p, 0, yd, w, yd, sel)
+    xe, xms = w*0.22, w*0.74
+    _fp_iwall(p, xe, 0, xe, yd, sel)
+    _fp_iwall(p, xms, 0, xms, yd, sel)
+    xmb = xms + (w-xms)*0.44
+    _fp_iwall(p, xmb, 0, xmb, yd*0.54, sel)
+    _fp_iwall(p, xms, yd*0.54, xmb, yd*0.54, sel)
+    xbd, xha, xba = w*0.38, w*0.52, w*0.66
+    _fp_iwall(p, xbd, yd, xbd, h, sel)
+    _fp_iwall(p, xha, yd, xha, h, sel)
+    _fp_iwall(p, xba, yd, xba, h, sel)
+    # labels
+    _fp_lbl(p, 'ENTRY', xe/2, yd*0.38, sel, sz-1)
+    _fp_lbl(p, 'GREAT ROOM + KITCHEN', (xe+xms)*0.50, yd*0.38, sel, sz)
+    _fp_lbl(p, 'MASTER', (xms+w)*0.50, yd*0.70, sel, sz)
+    _fp_lbl(p, 'M.BA', (xmb+w)*0.50, yd*0.24, sel, sz-1)
+    _fp_lbl(p, 'BED 2', xbd*0.50, yd+(h-yd)*0.50, sel, sz)
+    _fp_lbl(p, 'HALL', (xbd+xha)*0.50, yd+(h-yd)*0.38, sel, sz-1)
+    _fp_lbl(p, 'BATH', (xha+xba)*0.50, yd+(h-yd)*0.38, sel, sz-1)
+    _fp_lbl(p, 'BED 3', (xba+w)*0.50, yd+(h-yd)*0.50, sel, sz)
+    # fixtures
+    _fp_toilet_s(p, xmb+w*0.01, h*0.02, (w-xmb)*0.52, yd*0.38, sel)
+    _fp_vanity_s(p, xmb+w*0.01, yd*0.42, (w-xmb)*0.68, yd*0.34, sel)
+    _fp_toilet_s(p, xha+w*0.01, yd+h*0.02, (xba-xha)*0.56, (h-yd)*0.38, sel)
+    _fp_vanity_s(p, xha+w*0.01, yd+(h-yd)*0.44, (xba-xha)*0.72, (h-yd)*0.34, sel)
+    # doors
+    _fp_door(p, xe*0.48, 0, w*0.16, 270, -90, sel)
+    _fp_door(p, xms, yd*0.56, w*0.18, 0, 90, sel)
+    _fp_door(p, 0, yd, w*0.18, 0, -90, sel)
+    _fp_door(p, xba, yd, w*0.18, 0, -90, sel)
+    # windows
+    _fp_win(p, w*0.30, 0, w*0.68, 0, sel)
+    _fp_win(p, w*0.80, 0, w*0.95, 0, sel)
+    _fp_win(p, 0, h*0.06, 0, h*0.42, sel)
+    _fp_win(p, 0, yd+h*0.06, 0, yd+h*0.32, sel)
+    _fp_win(p, w*0.06, h, w*0.30, h, sel)
+    _fp_win(p, w*0.70, h, w*0.93, h, sel)
+    p.restore()
+
+def _draw_fp_home_4br_1800(p, w, h, sel):
+    """4BR ~1800 sqft  (44'×42')."""
+    p.save(); sz = max(6, int(min(w, h)*0.036))
+    _fp_out(p, w, h, sel)
+    yd = h*0.50
+    _fp_iwall(p, 0, yd, w, yd, sel)
+    xg, xl = w*0.28, w*0.82
+    _fp_iwall(p, xg, 0, xg, yd, sel)
+    _fp_iwall(p, xl, yd*0.38, xl, yd, sel)
+    _fp_iwall(p, xl, yd*0.38, w, yd*0.38, sel)
+    xm, xhb, xb3, xb4 = w*0.36, w*0.58, w*0.76, w*0.89
+    _fp_iwall(p, xm, yd, xm, h, sel)
+    _fp_iwall(p, xhb, yd, xhb, h, sel)
+    _fp_iwall(p, xb3, yd, xb3, h, sel)
+    _fp_iwall(p, xb4, yd, xb4, h, sel)
+    xmb = xm*0.58
+    _fp_iwall(p, xmb, yd, xmb, yd+(h-yd)*0.56, sel)
+    _fp_iwall(p, 0, yd+(h-yd)*0.56, xmb, yd+(h-yd)*0.56, sel)
+    # labels
+    _fp_lbl(p, 'GARAGE', xg*0.50, yd*0.38, sel, sz)
+    _fp_lbl(p, 'LIVING / DINING / KITCHEN', (xg+xl)*0.50, yd*0.38, sel, sz)
+    _fp_lbl(p, 'UTIL', (xl+w)*0.50, yd*0.70, sel, sz-2)
+    _fp_lbl(p, 'M.BA', xmb*0.50, yd+(h-yd)*0.26, sel, sz-1)
+    _fp_lbl(p, 'MASTER', (xmb+xm)*0.50, yd+(h-yd)*0.72, sel, sz)
+    _fp_lbl(p, 'BATH', (xm+xhb)*0.50, yd+(h-yd)*0.30, sel, sz-1)
+    _fp_lbl(p, 'BED 2', (xm+xhb)*0.50, yd+(h-yd)*0.72, sel, sz)
+    _fp_lbl(p, 'BED 3', (xhb+xb3)*0.50, yd+(h-yd)*0.50, sel, sz)
+    _fp_lbl(p, 'BED 4', (xb3+xb4)*0.50, yd+(h-yd)*0.50, sel, sz)
+    # fixtures
+    _fp_toilet_s(p, xmb*0.06, yd+h*0.02, xmb*0.48, (h-yd)*0.38, sel)
+    _fp_vanity_s(p, xmb*0.06, yd+(h-yd)*0.44, xmb*0.62, (h-yd)*0.34, sel)
+    _fp_toilet_s(p, xm+w*0.01, yd+h*0.02, (xhb-xm)*0.50, (h-yd)*0.38, sel)
+    _fp_vanity_s(p, xm+w*0.01, yd+(h-yd)*0.44, (xhb-xm)*0.65, (h-yd)*0.34, sel)
+    # doors
+    _fp_door(p, xg*0.45, 0, w*0.14, 270, -90, sel)
+    _fp_door(p, xmb, yd+(h-yd)*0.56, w*0.18, 0, -90, sel)
+    _fp_door(p, xm, yd, w*0.16, 0, -90, sel)
+    _fp_door(p, xhb, yd, w*0.16, 0, -90, sel)
+    _fp_door(p, xb3, yd, w*0.16, 0, -90, sel)
+    # windows
+    _fp_win(p, w*0.35, 0, w*0.73, 0, sel)
+    _fp_win(p, 0, h*0.08, 0, h*0.38, sel)
+    _fp_win(p, 0, yd+h*0.07, 0, yd+h*0.30, sel)
+    _fp_win(p, w*0.06, h, w*0.28, h, sel)
+    _fp_win(p, (xhb+xb3)*0.50-w*0.06, h, (xhb+xb3)*0.50+w*0.06, h, sel)
+    _fp_win(p, w*0.76, h, w*0.93, h, sel)
+    p.restore()
+
+def _draw_fp_home_4br_2000(p, w, h, sel):
+    """4BR open-plan ~2000 sqft  (48'×44')."""
+    p.save(); sz = max(6, int(min(w, h)*0.036))
+    _fp_out(p, w, h, sel)
+    yd = h*0.46
+    _fp_iwall(p, 0, yd, w, yd, sel)
+    xe, xmr = w*0.20, w*0.72
+    _fp_iwall(p, xe, 0, xe, yd, sel)
+    _fp_iwall(p, xmr, 0, xmr, yd, sel)
+    xmb = xmr + (w-xmr)*0.44
+    _fp_iwall(p, xmb, 0, xmb, yd*0.56, sel)
+    _fp_iwall(p, xmr, yd*0.56, xmb, yd*0.56, sel)
+    xb1, xba1, xb2, xb3, xba2 = w*0.22, w*0.36, w*0.50, w*0.64, w*0.78
+    for x in (xb1, xba1, xb2, xb3, xba2):
+        _fp_iwall(p, x, yd, x, h, sel)
+    # labels
+    _fp_lbl(p, 'ENTRY', xe*0.50, yd*0.38, sel, sz-1)
+    _fp_lbl(p, 'GREAT ROOM + KITCHEN', (xe+xmr)*0.50, yd*0.38, sel, sz)
+    _fp_lbl(p, 'MASTER', (xmr+w)*0.50, yd*0.68, sel, sz)
+    _fp_lbl(p, 'M.BA', (xmb+w)*0.50, yd*0.26, sel, sz-1)
+    _fp_lbl(p, 'BED 1', xb1*0.50, yd+(h-yd)*0.50, sel, sz)
+    _fp_lbl(p, 'BA', (xb1+xba1)*0.50, yd+(h-yd)*0.30, sel, sz-1)
+    _fp_lbl(p, 'BED 2', (xba1+xb2)*0.50, yd+(h-yd)*0.50, sel, sz)
+    _fp_lbl(p, 'BED 3', (xb2+xb3)*0.50, yd+(h-yd)*0.50, sel, sz)
+    _fp_lbl(p, 'BA', (xb3+xba2)*0.50, yd+(h-yd)*0.30, sel, sz-1)
+    _fp_lbl(p, 'BED 4', (xba2+w)*0.50, yd+(h-yd)*0.50, sel, sz)
+    # fixtures
+    _fp_toilet_s(p, xb1+w*0.01, yd+h*0.02, (xba1-xb1)*0.54, (h-yd)*0.38, sel)
+    _fp_vanity_s(p, xb1+w*0.01, yd+(h-yd)*0.44, (xba1-xb1)*0.70, (h-yd)*0.34, sel)
+    _fp_toilet_s(p, xb3+w*0.01, yd+h*0.02, (xba2-xb3)*0.54, (h-yd)*0.38, sel)
+    _fp_vanity_s(p, xb3+w*0.01, yd+(h-yd)*0.44, (xba2-xb3)*0.70, (h-yd)*0.34, sel)
+    _fp_toilet_s(p, xmb+w*0.01, h*0.02, (w-xmb)*0.54, yd*0.40, sel)
+    _fp_vanity_s(p, xmb+w*0.01, yd*0.44, (w-xmb)*0.70, yd*0.35, sel)
+    # doors
+    _fp_door(p, xe*0.46, 0, w*0.14, 270, -90, sel)
+    _fp_door(p, xmr, yd*0.58, w*0.16, 0, 90, sel)
+    _fp_door(p, 0, yd, w*0.16, 0, -90, sel)
+    _fp_door(p, xba1, yd, w*0.14, 0, -90, sel)
+    _fp_door(p, xb2, yd, w*0.14, 0, -90, sel)
+    _fp_door(p, xba2, yd, w*0.14, 0, -90, sel)
+    # windows
+    _fp_win(p, w*0.28, 0, w*0.65, 0, sel)
+    _fp_win(p, w*0.79, 0, w*0.93, 0, sel)
+    _fp_win(p, 0, h*0.05, 0, h*0.38, sel)
+    _fp_win(p, 0, yd+h*0.06, 0, yd+h*0.32, sel)
+    _fp_win(p, w*0.04, h, w*0.17, h, sel)
+    _fp_win(p, w*0.53, h, w*0.62, h, sel)
+    _fp_win(p, w*0.80, h, w*0.93, h, sel)
     p.restore()
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1308,32 +1778,63 @@ FIXTURE_SPECS = {
     'column_steel':     ('Column (Steel W)',       'Structural',  8,  8,  _draw_column_steel),
     'column_wood':      ('Post/Column (Wood)',     'Structural', 5.5, 5.5,_draw_column_wood),
     'beam_steel':       ('Steel Beam',             'Structural', 96,  6,  _draw_beam_steel),
+    # BEDROOM LAYOUTS
+    'fp_bed_twin':      ("Twin Bedroom 9'×10'",    'Bedroom Layouts', 108, 120, _draw_fp_bed_twin),
+    'fp_bed_standard':  ("Bedroom 11'×12'",        'Bedroom Layouts', 132, 144, _draw_fp_bed_standard),
+    'fp_bed_large':     ("Bedroom 12'×14' +WIC",   'Bedroom Layouts', 144, 168, _draw_fp_bed_large),
+    'fp_bed_master':    ("Master Bed 14'×16'",     'Bedroom Layouts', 168, 192, _draw_fp_bed_master),
+    'fp_bed_master_en': ("Master+Ensuite 14'×20'", 'Bedroom Layouts', 168, 240, _draw_fp_bed_master_en),
+    'fp_bed_kids':      ("Kids/Bunk 10'×12'",      'Bedroom Layouts', 120, 144, _draw_fp_bed_kids),
+    # FLOOR PLANS
+    'fp_home_2br_800':  ('2BR Home ~800 sqft',      'Floor Plans', 336, 360, _draw_fp_home_2br_800),
+    'fp_home_2br_1000': ('2BR Home ~1000 sqft',     'Floor Plans', 408, 360, _draw_fp_home_2br_1000),
+    'fp_home_3br_1200': ('3BR Home ~1200 sqft',     'Floor Plans', 432, 408, _draw_fp_home_3br_1200),
+    'fp_home_3br_1400': ('3BR Home ~1400 sqft',     'Floor Plans', 480, 432, _draw_fp_home_3br_1400),
+    'fp_home_4br_1800': ('4BR Home ~1800 sqft',     'Floor Plans', 528, 504, _draw_fp_home_4br_1800),
+    'fp_home_4br_2000': ('4BR Open Plan ~2000 sqft','Floor Plans', 576, 528, _draw_fp_home_4br_2000),
 }
 
 # Ordered category list (controls panel display order)
 FIXTURE_CATEGORIES = [
     'Kitchen', 'Bathroom', 'Bedroom', 'Living',
     'Stairs', 'Electrical', 'HVAC', 'Plumbing',
-    'Insulation', 'Structural',
+    'Insulation', 'Structural', 'Bedroom Layouts', 'Floor Plans',
 ]
 
 # ── FixtureItem ────────────────────────────────────────────────────────────────
 
-class FixtureItem(_SelectableMixin, QGraphicsItem):
-    item_type = 'fixture'
+class FixtureItem(_SelectableMixin, _RotatableMixin, QGraphicsItem):
+    item_type   = 'fixture'
+    _ROT_OFFSET = 18   # gap above item to handle
 
     def __init__(self, fixture_type: str, w: float = None, h: float = None):
         QGraphicsItem.__init__(self)
         self._setup_base()
+        self._rot_setup()
         self._ftype = fixture_type
         spec = FIXTURE_SPECS.get(fixture_type)
         self._w = float(w) if w is not None else float(spec[2] if spec else 24)
         self._h = float(h) if h is not None else float(spec[3] if spec else 24)
+        self._update_transform_origin()
+
+    def _update_transform_origin(self):
+        """Rotate around the item centre."""
+        self.setTransformOriginPoint(self._w / 2, self._h / 2)
+
+    # ── rotation handle positions ─────────────────────────────────────────────
+
+    def _rot_pivot_local(self) -> QPointF:
+        return QPointF(self._w / 2, self._h / 2)   # centre
+
+    def _rot_handle_local(self) -> QPointF:
+        extra = self._ROT_OFFSET + self._ROT_R + 2
+        return QPointF(self._w / 2, -extra)
 
     # ── QGraphicsItem interface ───────────────────────────────────────────────
 
     def boundingRect(self) -> QRectF:
-        return QRectF(0, 0, self._w, self._h)
+        extra = self._ROT_OFFSET + self._ROT_R * 2 + 6
+        return QRectF(0, -extra, self._w, self._h + extra)
 
     def paint(self, painter, option, widget=None):
         painter.save()
@@ -1355,6 +1856,8 @@ class FixtureItem(_SelectableMixin, QGraphicsItem):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(QRectF(-1, -1, self._w+2, self._h+2))
         painter.restore()
+        # Rotation handle drawn outside the save/restore
+        self._draw_rot_handle(painter)
 
     # ── Info / serialisation ──────────────────────────────────────────────────
 
